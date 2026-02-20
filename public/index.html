@@ -369,32 +369,6 @@
       max-height: 300px;
     }
 
-    .command-search {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-
-    .command-search input {
-      width: 100%;
-      padding: 8px 12px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--bg-input);
-      color: var(--text-primary);
-      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
-      font-size: 14px;
-      outline: none;
-    }
-
-    .command-search input:focus {
-      border-color: var(--accent);
-    }
-
-    .command-search input::placeholder {
-      color: var(--text-muted);
-    }
-
     .command-list {
       flex: 1;
       overflow-y: auto;
@@ -511,9 +485,6 @@
     <div class="command-palette" id="commandPalette">
       <div class="command-palette-inner">
         <div class="command-palette-content" id="commandPaletteContent">
-          <div class="command-search">
-            <input type="text" id="commandSearch" placeholder="Search commands..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-          </div>
           <div class="command-list" id="commandList"></div>
         </div>
       </div>
@@ -661,7 +632,6 @@
     const statusText = document.getElementById('statusText');
     const commandPalette = document.getElementById('commandPalette');
     const commandPaletteContent = document.getElementById('commandPaletteContent');
-    const commandSearch = document.getElementById('commandSearch');
     const commandList = document.getElementById('commandList');
     const commandsBtn = document.getElementById('commandsBtn');
 
@@ -703,7 +673,6 @@
     // COMMAND PALETTE STATE
     // ============================================
     let allCommands = [];
-    let filteredCommands = [];
     let paletteOpen = false;
 
     // Fetch commands from server
@@ -712,11 +681,9 @@
         const res = await fetch('/api/commands');
         const data = await res.json();
         allCommands = data.commands || [];
-        filteredCommands = allCommands;
       } catch (error) {
         console.error('Failed to fetch commands:', error);
         allCommands = [];
-        filteredCommands = [];
       }
     }
 
@@ -740,12 +707,12 @@
 
     // Render command list
     function renderCommands() {
-      if (filteredCommands.length === 0) {
-        commandList.innerHTML = '<div class="command-empty">No commands found</div>';
+      if (allCommands.length === 0) {
+        commandList.innerHTML = '<div class="command-empty">No commands available</div>';
         return;
       }
 
-      commandList.innerHTML = filteredCommands.map(cmd => `
+      commandList.innerHTML = allCommands.map(cmd => `
         <div class="command-item" data-command="${cmd.name}">
           <span class="command-name">/${cmd.name}</span>
           <span class="command-description">${cmd.description}</span>
@@ -759,20 +726,6 @@
           selectCommand(cmdName);
         });
       });
-    }
-
-    // Filter commands based on search input
-    function filterCommands(query) {
-      const q = query.toLowerCase().replace(/^\//, '');
-      if (!q) {
-        filteredCommands = allCommands;
-      } else {
-        filteredCommands = allCommands.filter(cmd =>
-          cmd.name.toLowerCase().includes(q) ||
-          cmd.description.toLowerCase().includes(q)
-        );
-      }
-      renderCommands();
     }
 
     // Select a command and fill input
@@ -798,12 +751,9 @@
       paletteOpen = true;
       commandPalette.classList.add('open');
       commandsBtn.classList.add('active');
-      commandSearch.value = '';
-      filterCommands('');
+      renderCommands();
       updatePaletteHeight();
       updateOutputPadding();
-      // Focus search input after a brief delay for animation
-      setTimeout(() => commandSearch.focus(), 50);
     }
 
     // Close palette
@@ -814,24 +764,6 @@
       // Wait for the 200ms grid animation to complete before updating padding
       setTimeout(() => updateOutputPadding(), 220);
     }
-
-    // Command search input handler
-    commandSearch.addEventListener('input', (e) => {
-      filterCommands(e.target.value);
-    });
-
-    // Handle escape key in search input
-    commandSearch.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        closeCommandPalette();
-        messageInput.focus();
-      } else if (e.key === 'Enter') {
-        // Select first command if available
-        if (filteredCommands.length > 0) {
-          selectCommand(filteredCommands[0].name);
-        }
-      }
-    });
 
     // Close palette when clicking outside
     document.addEventListener('click', (e) => {
