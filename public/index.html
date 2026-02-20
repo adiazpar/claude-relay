@@ -105,41 +105,6 @@
       50% { opacity: 0.5; }
     }
 
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .icon-btn {
-      width: 36px;
-      height: 36px;
-      border: none;
-      border-radius: 10px;
-      background: var(--bg-tertiary);
-      color: var(--text-secondary);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s ease;
-    }
-
-    @media (hover: hover) {
-      .icon-btn:hover {
-        background: var(--border-light);
-        color: var(--text-primary);
-      }
-    }
-
-    .icon-btn:active {
-      transform: scale(0.95);
-    }
-
-    .icon-btn svg {
-      width: 18px;
-      height: 18px;
-    }
-
     /* Output area - virtual scrolling container */
     .output-container {
       flex: 1;
@@ -348,14 +313,6 @@
           <span id="statusText">Starting...</span>
         </div>
       </div>
-    </div>
-    <div class="header-right">
-      <button class="icon-btn" onclick="refreshOutput()" title="Refresh">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
-          <path d="M21 3v5h-5"/>
-        </svg>
-      </button>
     </div>
   </div>
 
@@ -753,11 +710,6 @@
       ws.send(JSON.stringify({ type: 'key', key: key }));
     }
 
-    function refreshOutput() {
-      if (ws && connected) {
-        ws.send(JSON.stringify({ type: 'refresh' }));
-      }
-    }
 
     // ============================================
     // EVENT LISTENERS
