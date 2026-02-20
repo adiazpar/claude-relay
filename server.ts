@@ -186,54 +186,47 @@ tmuxBridge.on('output', (rawContent: string) => {
 // Start polling for output changes
 tmuxBridge.startPolling()
 
-const HTTP_PORT = 3001
-const HTTPS_PORT = 3443
+const PORT = 3001
 
-// Always start HTTP server (for cert download and fallback)
-httpServer.listen(HTTP_PORT, HOST, () => {
-  console.log(`HTTP server on port ${HTTP_PORT}`)
-})
-
-// Start HTTPS server if available
+// Start HTTPS server if available, otherwise HTTP
 if (httpsServer) {
-  httpsServer.listen(HTTPS_PORT, HOST, () => {
+  httpsServer.listen(PORT, HOST, () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                    Claude Relay Server                     ║
 ╠════════════════════════════════════════════════════════════╣
-║  HTTP:      http://100.113.9.34:${HTTP_PORT}  (no voice)          ║
-║  HTTPS:     https://100.113.9.34:${HTTPS_PORT} (voice enabled)    ║
+║  URL: https://100.113.9.34:${PORT}                           ║
 ╠════════════════════════════════════════════════════════════╣
 ║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
 ║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
-╠════════════════════════════════════════════════════════════╣
-║  To enable voice on iOS:                                   ║
-║  1. Go to http://100.113.9.34:${HTTP_PORT}/cert                   ║
-║  2. Install the certificate in Settings > General >        ║
-║     VPN & Device Management                                ║
-║  3. Trust it in Settings > General > About >               ║
-║     Certificate Trust Settings                             ║
-║  4. Then visit https://100.113.9.34:${HTTPS_PORT}                 ║
+║  Voice Input:  Enabled                                     ║
 ╚════════════════════════════════════════════════════════════╝
 `)
   })
 } else {
-  console.log(`
+  httpServer.listen(PORT, HOST, () => {
+    console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                    Claude Relay Server                     ║
 ╠════════════════════════════════════════════════════════════╣
-║  URL: http://100.113.9.34:${HTTP_PORT}                            ║
+║  URL: http://100.113.9.34:${PORT}                            ║
 ╠════════════════════════════════════════════════════════════╣
-║  WARNING: No SSL certs. Voice input unavailable.           ║
+║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
+║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
+║  Voice Input:  Disabled (no SSL certs)                     ║
 ╚════════════════════════════════════════════════════════════╝
 `)
+  })
 }
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...')
   tmuxBridge.stopPolling()
-  httpServer.close()
-  if (httpsServer) httpsServer.close()
+  if (httpsServer) {
+    httpsServer.close()
+  } else {
+    httpServer.close()
+  }
   process.exit(0)
 })
