@@ -120,6 +120,7 @@
       /* padding-bottom is set dynamically by JS based on input area height */
       touch-action: pan-y; /* Allow vertical scroll only in this container */
       overscroll-behavior: contain; /* Prevent scroll chaining to parent */
+      transition: padding-bottom 0.15s ease; /* Smooth adjustment with keyboard */
     }
 
     .output-container::-webkit-scrollbar {
@@ -734,18 +735,22 @@
     // ============================================
     const CONTENT_GAP = 16; // Space between last line of content and input area
 
-    function updateOutputPadding() {
+    function updateOutputPadding(forceScroll = false) {
       // Check if we're currently at the bottom before changing padding
-      const wasAtBottom = (output.scrollHeight - output.scrollTop - output.clientHeight) < 50;
+      const wasAtBottom = forceScroll || (output.scrollHeight - output.scrollTop - output.clientHeight) < 50;
 
       const inputAreaHeight = inputArea.offsetHeight;
       output.style.paddingBottom = (inputAreaHeight + CONTENT_GAP) + 'px';
 
-      // After padding changes, scroll to stay at bottom if we were there
+      // After padding changes, scroll smoothly during the 150ms transition
       if (wasAtBottom) {
-        requestAnimationFrame(() => {
-          output.scrollTop = output.scrollHeight;
-        });
+        const scrollToEnd = () => { output.scrollTop = output.scrollHeight; };
+        scrollToEnd();
+        // Follow the transition with multiple updates
+        requestAnimationFrame(scrollToEnd);
+        setTimeout(scrollToEnd, 50);
+        setTimeout(scrollToEnd, 100);
+        setTimeout(scrollToEnd, 150);
       }
     }
 
@@ -865,13 +870,15 @@
         // Keyboard is open if current height is significantly less than max
         const keyboardOpen = (maxViewportHeight - currentHeight) > 150;
         inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
-        // Update output padding when keyboard state changes
-        requestAnimationFrame(updateOutputPadding);
+        // Update output padding and force scroll to maintain consistent spacing
+        updateOutputPadding(true);
       }
     }
 
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', updateKeyboardState);
+      // Also listen to scroll events on visualViewport for keyboard transitions
+      window.visualViewport.addEventListener('scroll', () => updateOutputPadding(true));
       // Initial state
       updateKeyboardState();
     } else {
@@ -880,7 +887,7 @@
     }
 
     // Initial padding calculation
-    requestAnimationFrame(updateOutputPadding);
+    updateOutputPadding();
 
     // ============================================
     // START
