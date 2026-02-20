@@ -1,0 +1,75 @@
+/* ============================================
+   GLOBAL STYLES - Claude Relay
+   ============================================ */
+
+/* CSS Variables */
+:root {
+  --bg-primary: #0f0f1a;
+  --bg-secondary: #1a1a2e;
+  --bg-tertiary: #252542;
+  --bg-input: #1e1e32;
+  --text-primary: #f0f0f5;
+  --text-secondary: #8888a0;
+  --text-muted: #5a5a70;
+  --accent: #6366f1;
+  --accent-glow: rgba(99, 102, 241, 0.3);
+  --accent-hover: #818cf8;
+  --success: #10b981;
+  --success-glow: rgba(16, 185, 129, 0.2);
+  --error: #ef4444;
+  --border: #2a2a45;
+  --border-light: #3a3a55;
+  --shadow: rgba(0, 0, 0, 0.3);
+}
+
+/* Base reset */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* Global button styles */
+@media (hover: hover) {
+  button {
+    cursor: pointer;
+  }
+}
+
+button:active {
+  transform: scale(0.95);
+}
+
+/* Fixed bar gradient - top (header) */
+.fixed-bar-top {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(
+    to top,
+    rgba(15, 15, 26, 0) 0%,
+    rgba(15, 15, 26, 0.8) 30%,
+    rgba(15, 15, 26, 1) 60%
+  );
+  z-index: 50;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+}
+
+/* Fixed bar gradient - bottom (input area) */
+.fixed-bar-bottom {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(
+    to bottom,
+    rgba(15, 15, 26, 0) 0%,
+    rgba(15, 15, 26, 0.8) 30%,
+    rgba(15, 15, 26, 1) 60%
+  );
+  z-index: 50;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+}

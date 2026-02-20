@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0f0f1a">
+  <title>Claude Relay</title>
+  <link rel="stylesheet" href="global.css">
+  <style>
+    html {
+      height: 100%;
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+    }
+
+    body {
+      height: 100%;
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      overscroll-behavior: none;
+    }
+
+    /* Header */
+    .header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: var(--bg-primary);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 50;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo {
+      width: 36px;
+      height: 36px;
+      background: #D77655;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(215, 118, 85, 0.3);
+      padding: 6px;
+    }
+
+    .logo svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .header-title {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .header h1 {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--error);
+      box-shadow: 0 0 8px var(--error);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    .status-dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .icon-btn {
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 10px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    @media (hover: hover) {
+      .icon-btn:hover {
+        background: var(--border-light);
+        color: var(--text-primary);
+      }
+    }
+
+    .icon-btn:active {
+      transform: scale(0.95);
+    }
+
+    .icon-btn svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    /* Output area - virtual scrolling container */
+    .output-container {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      background: var(--bg-primary);
+      color: #e6edf3;
+      -webkit-overflow-scrolling: touch;
+      position: relative;
+      padding-top: 60px; /* Space for fixed header */
+      padding-bottom: 140px; /* Space for fixed input area */
+    }
+
+    .output-container::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .output-container::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .output-container::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    @media (hover: hover) {
+      .output-container::-webkit-scrollbar-thumb:hover {
+        background: var(--border-light);
+      }
+    }
+
+    /* Virtual scroll spacer - creates scrollable height */
+    .virtual-spacer {
+      width: 100%;
+      pointer-events: none;
+    }
+
+    /* Visible rows container - positioned absolutely */
+    .virtual-content {
+      position: absolute;
+      left: 0;
+      right: 0;
+      padding: 0 16px;
+      font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      word-break: break-word;
+    }
+
+    /* Individual terminal line */
+    .terminal-line {
+      min-height: 16.8px; /* 12px * 1.4 line-height */
+    }
+
+
+    /* Input area - extends .fixed-bar-bottom from global.css */
+    .input-area {
+      padding: 24px 16px 12px;
+      padding-bottom: calc(12px + env(safe-area-inset-bottom));
+      touch-action: none; /* Prevent dragging */
+    }
+
+    /* Shortcuts row above textarea */
+    .shortcuts-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+      padding-left: 4px;
+    }
+
+    .shortcut-btn {
+      height: 28px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      font-size: 12px;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .shortcut-btn svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    @media (hover: hover) {
+      .shortcut-btn:hover {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+        background: rgba(99, 102, 241, 0.1);
+      }
+    }
+
+    .shortcut-btn:active {
+      transform: scale(0.97);
+    }
+
+
+    /* Input row - this IS the styled input field */
+    .input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      padding: 6px 6px 6px 14px;
+      border: 1px solid transparent;
+      border-radius: 22px;
+      background: var(--bg-input);
+      box-shadow: 0 2px 8px var(--shadow);
+      transition: all 0.2s ease;
+    }
+
+    .input-row:focus-within {
+      border-color: var(--accent);
+    }
+
+    textarea {
+      flex: 1;
+      min-height: 28px;
+      max-height: 120px;
+      padding: 2px 0;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      font-size: 15px;
+      font-weight: 400;
+      letter-spacing: -0.1px;
+      line-height: 24px;
+      resize: none;
+      outline: none;
+      overflow-y: auto;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    textarea::-webkit-scrollbar {
+      display: none;
+    }
+
+    textarea::placeholder {
+      color: var(--text-muted);
+    }
+
+    .send-btn {
+      width: 40px;
+      height: 28px;
+      flex-shrink: 0;
+      border: none;
+      border-radius: 14px;
+      background: var(--accent);
+      color: var(--bg-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .send-btn svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    @media (hover: hover) {
+      .send-btn:hover {
+        background: var(--accent-hover);
+      }
+    }
+
+    .send-btn:active {
+      background: var(--accent-hover);
+    }
+
+    .send-btn:disabled {
+      border-color: var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text-muted);
+      cursor: not-allowed;
+    }
+
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 509.64"><path fill="#FCF2EE" fill-rule="nonzero" d="M142.27 316.619l73.655-41.326 1.238-3.589-1.238-1.996-3.589-.001-12.31-.759-42.084-1.138-36.498-1.516-35.361-1.896-8.897-1.895-8.34-10.995.859-5.484 7.482-5.03 10.717.935 23.683 1.617 35.537 2.452 25.782 1.517 38.193 3.968h6.064l.86-2.451-2.073-1.517-1.618-1.517-36.776-24.922-39.81-26.338-20.852-15.166-11.273-7.683-5.687-7.204-2.451-15.721 10.237-11.273 13.75.935 3.513.936 13.928 10.716 29.749 23.027 38.848 28.612 5.687 4.727 2.275-1.617.278-1.138-2.553-4.271-21.13-38.193-22.546-38.848-10.035-16.101-2.654-9.655c-.935-3.968-1.617-7.304-1.617-11.374l11.652-15.823 6.445-2.073 15.545 2.073 6.547 5.687 9.655 22.092 15.646 34.78 24.265 47.291 7.103 14.028 3.791 12.992 1.416 3.968 2.449-.001v-2.275l1.997-26.641 3.69-32.707 3.589-42.084 1.239-11.854 5.863-14.206 11.652-7.683 9.099 4.348 7.482 10.716-1.036 6.926-4.449 28.915-8.72 45.294-5.687 30.331h3.313l3.792-3.791 15.342-20.372 25.782-32.227 11.374-12.789 13.27-14.129 8.517-6.724 16.1-.001 11.854 17.617-5.307 18.199-16.581 21.029-13.75 17.819-19.716 26.54-12.309 21.231 1.138 1.694 2.932-.278 44.536-9.479 24.062-4.347 28.714-4.928 12.992 6.066 1.416 6.167-5.106 12.613-30.71 7.583-36.018 7.204-53.636 12.689-.657.48.758.935 24.164 2.275 10.337.556h25.301l47.114 3.514 12.309 8.139 7.381 9.959-1.238 7.583-18.957 9.655-25.579-6.066-59.702-14.205-20.474-5.106-2.83-.001v1.694l17.061 16.682 31.266 28.233 39.152 36.397 1.997 8.999-5.03 7.102-5.307-.758-34.401-25.883-13.27-11.651-30.053-25.302-1.996-.001v2.654l6.926 10.136 36.574 54.975 1.895 16.859-2.653 5.485-9.479 3.311-10.414-1.895-21.408-30.054-22.092-33.844-17.819-30.331-2.173 1.238-10.515 113.261-4.929 5.788-11.374 4.348-9.478-7.204-5.03-11.652 5.03-23.027 6.066-30.052 4.928-23.886 4.449-29.674 2.654-9.858-.177-.657-2.173.278-22.37 30.71-34.021 45.977-26.919 28.815-6.445 2.553-11.173-5.789 1.037-10.337 6.243-9.2 37.257-47.392 22.47-29.371 14.508-16.961-.101-2.451h-.859l-98.954 64.251-17.618 2.275-7.583-7.103.936-11.652 3.589-3.791 29.749-20.474-.101.102.024.101z"/></svg>
+      </div>
+      <div class="header-title">
+        <h1>Claude Relay</h1>
+        <div class="status-badge">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText">Starting...</span>
+        </div>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="icon-btn" onclick="refreshOutput()" title="Refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+          <path d="M21 3v5h-5"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="output-container" id="output">
+    <div class="virtual-spacer" id="virtualSpacer"></div>
+    <div class="virtual-content" id="virtualContent"></div>
+  </div>
+
+  <div class="input-area fixed-bar-bottom">
+    <!-- Shortcuts row -->
+    <div class="shortcuts-row">
+      <button class="shortcut-btn" onclick="sendKey('Escape')" title="Escape">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 6L6 18"/>
+          <path d="M6 6l12 12"/>
+        </svg>
+        <span>Escape</span>
+      </button>
+      <button class="shortcut-btn" onclick="sendKey('Enter')" title="Enter">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 10l-5 5 5 5"/>
+          <path d="M20 4v7a4 4 0 0 1-4 4H4"/>
+        </svg>
+        <span>Enter</span>
+      </button>
+      <button class="shortcut-btn" onclick="sendKey('S-Tab')" title="Switch Mode (Shift+Tab)" style="margin-left: auto;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 2.1l4 4-4 4"/>
+          <path d="M3 12.2v-2a4 4 0 0 1 4-4h12.8"/>
+          <path d="M7 21.9l-4-4 4-4"/>
+          <path d="M21 11.8v2a4 4 0 0 1-4 4H4.2"/>
+        </svg>
+        <span>Change mode</span>
+      </button>
+    </div>
+    <!-- Input row -->
+    <div class="input-row">
+      <textarea
+        id="messageInput"
+        placeholder="Message Claude..."
+        rows="1"
+        autocomplete="off"
+        autocorrect="on"
+        autocapitalize="sentences"
+        spellcheck="true"
+        data-form-type="other"
+      ></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 19V5"/>
+          <path d="M5 12l7-7 7 7"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+
+  <script>
+    // ============================================
+    // POLYFILLS & ANSI CONVERTER
+    // ============================================
+    window.requestIdleCallback = window.requestIdleCallback || function(callback, options) {
+      const start = Date.now();
+      return setTimeout(() => {
+        callback({
+          didTimeout: false,
+          timeRemaining: () => Math.max(0, 50 - (Date.now() - start))
+        });
+      }, options?.timeout ? Math.min(100, options.timeout) : 1);
+    };
+    window.cancelIdleCallback = window.cancelIdleCallback || function(id) {
+      clearTimeout(id);
+    };
+
+    // ANSI to HTML converter - handles 256 colors and common codes
+    const ANSI_COLORS = [
+      '#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5',
+      '#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff',
+      // 216 color cube (16-231)
+      ...(() => {
+        const colors = [];
+        for (let r = 0; r < 6; r++)
+          for (let g = 0; g < 6; g++)
+            for (let b = 0; b < 6; b++)
+              colors.push(`#${[r,g,b].map(c => (c ? c * 40 + 55 : 0).toString(16).padStart(2,'0')).join('')}`);
+        return colors;
+      })(),
+      // 24 grayscale (232-255)
+      ...Array.from({length: 24}, (_, i) => {
+        const v = (i * 10 + 8).toString(16).padStart(2, '0');
+        return `#${v}${v}${v}`;
+      })
+    ];
+
+    function ansiToHtml(text) {
+      if (!text) return '';
+
+      let result = '';
+      let fg = null, bg = null, bold = false, italic = false, underline = false;
+      let i = 0;
+
+      function openSpan() {
+        const styles = [];
+        if (fg) styles.push(`color:${fg}`);
+        if (bg) styles.push(`background-color:${bg}`);
+        if (bold) styles.push('font-weight:bold');
+        if (italic) styles.push('font-style:italic');
+        if (underline) styles.push('text-decoration:underline');
+        return styles.length ? `<span style="${styles.join(';')}">` : '';
+      }
+
+      function closeSpan() {
+        return (fg || bg || bold || italic || underline) ? '</span>' : '';
+      }
+
+      while (i < text.length) {
+        if (text[i] === '\x1b' && text[i+1] === '[') {
+          let j = i + 2;
+          while (j < text.length && !/[A-Za-z]/.test(text[j])) j++;
+
+          if (text[j] === 'm') {
+            result += closeSpan();
+            const codes = text.slice(i+2, j).split(';').map(Number);
+
+            for (let k = 0; k < codes.length; k++) {
+              const c = codes[k];
+              if (c === 0) { fg = bg = null; bold = italic = underline = false; }
+              else if (c === 1) bold = true;
+              else if (c === 3) italic = true;
+              else if (c === 4) underline = true;
+              else if (c === 22) bold = false;
+              else if (c === 23) italic = false;
+              else if (c === 24) underline = false;
+              else if (c >= 30 && c <= 37) fg = ANSI_COLORS[c - 30];
+              else if (c === 38 && codes[k+1] === 5) { fg = ANSI_COLORS[codes[k+2]] || fg; k += 2; }
+              else if (c === 38 && codes[k+1] === 2) { fg = `rgb(${codes[k+2]},${codes[k+3]},${codes[k+4]})`; k += 4; }
+              else if (c === 39) fg = null;
+              else if (c >= 40 && c <= 47) bg = ANSI_COLORS[c - 40];
+              else if (c === 48 && codes[k+1] === 5) { bg = ANSI_COLORS[codes[k+2]] || bg; k += 2; }
+              else if (c === 48 && codes[k+1] === 2) { bg = `rgb(${codes[k+2]},${codes[k+3]},${codes[k+4]})`; k += 4; }
+              else if (c === 49) bg = null;
+              else if (c >= 90 && c <= 97) fg = ANSI_COLORS[c - 90 + 8];
+              else if (c >= 100 && c <= 107) bg = ANSI_COLORS[c - 100 + 8];
+            }
+            result += openSpan();
+            i = j + 1;
+            continue;
+          }
+          // Skip other escape sequences
+          i = j + 1;
+          continue;
+        }
+
+        // Escape HTML
+        const ch = text[i];
+        if (ch === '&') result += '&amp;';
+        else if (ch === '<') result += '&lt;';
+        else if (ch === '>') result += '&gt;';
+        else result += ch;
+        i++;
+      }
+
+      result += closeSpan();
+      return result;
+    }
+
+    // ============================================
+    // DOM ELEMENTS
+    // ============================================
+    const output = document.getElementById('output');
+    const virtualSpacer = document.getElementById('virtualSpacer');
+    const virtualContent = document.getElementById('virtualContent');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+
+    // ============================================
+    // VIRTUAL SCROLLING STATE
+    // ============================================
+    const ROW_HEIGHT = 16.8; // 12px font * 1.4 line-height
+    const BUFFER_ROWS = 5;   // Extra rows above/below viewport
+
+    let allLines = [];       // All lines from server (raw ANSI)
+    let renderedRange = { start: 0, end: 0 };
+    let followMode = true;   // Auto-scroll to bottom
+    let scrollRAF = null;    // RequestAnimationFrame for scroll handling
+
+    // ============================================
+    // CONNECTION STATE
+    // ============================================
+    let ws = null;
+    let connected = false;
+    let claudeRunning = false;
+    let lastCols = 0;
+    let resizeTimeout = null;
+
+
+
+    // ============================================
+    // VIRTUAL SCROLLING FUNCTIONS
+    // ============================================
+    const PADDING_TOP = 60; // Space for fixed header
+    const PADDING_BOTTOM = 16;
+
+    function getVisibleRange() {
+      const scrollTop = output.scrollTop;
+      const viewportHeight = output.clientHeight;
+
+      const startRow = Math.max(0, Math.floor((scrollTop - PADDING_TOP) / ROW_HEIGHT) - BUFFER_ROWS);
+      const endRow = Math.min(allLines.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+
+      return { start: startRow, end: endRow };
+    }
+
+    let lastContentVersion = 0; // Track when content changes
+
+    function renderVisibleLines(forceRender = false) {
+      const range = getVisibleRange();
+
+      // Skip if range hasn't changed AND we're not forcing a render
+      if (!forceRender &&
+          range.start === renderedRange.start &&
+          range.end === renderedRange.end) {
+        return;
+      }
+
+      renderedRange = range;
+
+      // Build HTML for visible lines only (convert ANSI to HTML client-side)
+      const visibleLines = allLines.slice(range.start, range.end);
+      const html = visibleLines.map(line =>
+        `<div class="terminal-line">${ansiToHtml(line)}</div>`
+      ).join('');
+
+      // Position the content
+      virtualContent.style.top = (PADDING_TOP + range.start * ROW_HEIGHT) + 'px';
+      virtualContent.innerHTML = html;
+    }
+
+    function updateVirtualHeight() {
+      const totalHeight = PADDING_TOP + PADDING_BOTTOM + (allLines.length * ROW_HEIGHT);
+      virtualSpacer.style.height = totalHeight + 'px';
+    }
+
+    function handleScroll() {
+      // Cancel any pending RAF
+      if (scrollRAF) cancelAnimationFrame(scrollRAF);
+
+      // Use RAF to batch scroll handling
+      scrollRAF = requestAnimationFrame(() => {
+        // Check if user scrolled away from bottom
+        const scrollBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
+        followMode = scrollBottom < 50; // Within 50px of bottom = follow mode
+
+        renderVisibleLines();
+      });
+    }
+
+    function scrollToBottom() {
+      if (followMode) {
+        output.scrollTop = output.scrollHeight;
+      }
+    }
+
+    // ============================================
+    // OUTPUT UPDATE FUNCTIONS
+    // ============================================
+    function applyLinesUpdate(lines, mode) {
+      allLines = lines;
+      updateVirtualHeight();
+      renderVisibleLines(true); // Force re-render since content changed
+      scrollToBottom();
+    }
+
+    function scheduleOutputUpdate(lines, mode) {
+      // Apply immediately - virtual scrolling is efficient
+      applyLinesUpdate(lines, mode);
+    }
+
+    // ============================================
+    // UI FUNCTIONS
+    // ============================================
+
+    function calculateColumns() {
+      const padding = 32;
+      const availableWidth = output.clientWidth - padding;
+      const charWidth = 7.22;
+      const cols = Math.floor(availableWidth / charWidth);
+      return Math.max(40, cols);
+    }
+
+    function sendResize() {
+      if (!ws || !connected) return;
+      const cols = calculateColumns();
+      if (cols !== lastCols) {
+        lastCols = cols;
+        ws.send(JSON.stringify({ type: 'resize', cols: cols }));
+      }
+    }
+
+    function handleResize() {
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        sendResize();
+        renderVisibleLines(); // Re-render on resize
+      }, 150);
+    }
+
+    function updateStatus() {
+      if (!connected) {
+        statusDot.classList.remove('connected');
+        statusText.textContent = 'Reconnecting...';
+      } else if (!claudeRunning) {
+        statusDot.classList.remove('connected');
+        statusText.textContent = 'Claude not detected';
+      } else {
+        statusDot.classList.add('connected');
+        statusText.textContent = 'Connected';
+      }
+    }
+
+    // ============================================
+    // WEBSOCKET & MESSAGE HANDLING
+    // ============================================
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${window.location.host}`);
+
+      ws.onopen = () => {
+        connected = true;
+        updateStatus();
+        setTimeout(sendResize, 100);
+      };
+
+      ws.onclose = () => {
+        connected = false;
+        // Don't reset claudeRunning - server state hasn't changed
+        updateStatus();
+        // Reconnect quickly
+        setTimeout(connect, 500);
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+      };
+    }
+
+    function handleMessage(msg) {
+      switch (msg.type) {
+        case 'status':
+          claudeRunning = msg.claudeRunning;
+          updateStatus();
+          break;
+
+        case 'output':
+          // Server sends lines array for virtual scrolling
+          if (msg.lines) {
+            scheduleOutputUpdate(msg.lines, msg.mode);
+          }
+          break;
+
+        case 'sent':
+          if (!msg.success) {
+            console.error('Failed to send message');
+          }
+          break;
+      }
+    }
+
+    function animateButton(btn) {
+      btn.animate([
+        { transform: 'scale(1)' },
+        { transform: 'scale(0.85)' },
+        { transform: 'scale(1.08)' },
+        { transform: 'scale(1)' }
+      ], {
+        duration: 350,
+        easing: 'ease-in-out'
+      });
+    }
+
+    // Apply tap animation to all buttons
+    document.querySelectorAll('button').forEach(btn => {
+      btn.addEventListener('click', () => animateButton(btn));
+    });
+
+    function sendMessage() {
+      const message = messageInput.value.trim();
+      if (!message || !connected) return;
+
+      // Optimistic UI: clear input immediately
+      messageInput.value = '';
+      messageInput.style.height = 'auto';
+
+      ws.send(JSON.stringify({ type: 'send', content: message }));
+    }
+
+
+    function sendKey(key) {
+      if (!connected) return;
+      ws.send(JSON.stringify({ type: 'key', key: key }));
+    }
+
+    function refreshOutput() {
+      if (ws && connected) {
+        ws.send(JSON.stringify({ type: 'refresh' }));
+      }
+    }
+
+    // ============================================
+    // EVENT LISTENERS
+    // ============================================
+    output.addEventListener('scroll', handleScroll, { passive: true });
+
+    messageInput.addEventListener('input', function() {
+      const textarea = this;
+      requestAnimationFrame(() => {
+        textarea.style.height = 'auto';
+        textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+      });
+    });
+
+    messageInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    window.addEventListener('resize', handleResize);
+
+    window.addEventListener('load', () => {
+      if (window.innerWidth > 768) {
+        messageInput.focus();
+      }
+    });
+
+    // ============================================
+    // VISIBILITY CHANGE - Reconnect when returning to app
+    // ============================================
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        // User returned to app - check connection and reconnect if needed
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connect();
+        } else {
+          // Connection is open, request fresh output
+          refreshOutput();
+        }
+      }
+    });
+
+    // ============================================
+    // iOS FIXES
+    // ============================================
+    // Prevent input area from being dragged on iOS
+    const inputArea = document.querySelector('.input-area');
+    inputArea.addEventListener('touchmove', (e) => {
+      // Allow scrolling inside textarea if content overflows
+      if (e.target !== messageInput) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+
+    // Prevent body scroll on iOS
+    document.body.addEventListener('touchmove', (e) => {
+      // Only allow scroll inside output container
+      if (!output.contains(e.target)) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+
+    // ============================================
+    // START
+    // ============================================
+    // Fetch initial content immediately via REST while WebSocket connects
+    fetch('/api/output')
+      .then(res => res.json())
+      .then(data => {
+        if (data.output && allLines.length === 0) {
+          applyLinesUpdate(data.output.split('\n'), null);
+        }
+      })
+      .catch(() => {}); // Ignore errors, WebSocket will handle it
+
+    connect();
+  </script>
+</body>
+</html>
