@@ -280,6 +280,7 @@
       align-items: center;
       justify-content: center;
       box-shadow: 0 4px 12px rgba(215, 118, 85, 0.3);
+      position: relative;
     }
 
     .send-btn svg {
@@ -302,6 +303,47 @@
       background: var(--bg-tertiary);
       color: var(--text-muted);
       cursor: not-allowed;
+    }
+
+    /* Voice recording state */
+    .send-btn.recording {
+      background: #e53935;
+      animation: recording-pulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes recording-pulse {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.4);
+      }
+      50% {
+        box-shadow: 0 0 0 8px rgba(229, 57, 53, 0);
+      }
+    }
+
+    .send-btn .icon-send,
+    .send-btn .icon-mic {
+      position: absolute;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+
+    .send-btn .icon-send {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    .send-btn .icon-mic {
+      opacity: 0;
+      transform: scale(0.8);
+    }
+
+    .send-btn.show-mic .icon-send {
+      opacity: 0;
+      transform: scale(0.8);
+    }
+
+    .send-btn.show-mic .icon-mic {
+      opacity: 1;
+      transform: scale(1);
     }
 
     /* Command palette button */
@@ -501,10 +543,17 @@
         spellcheck="true"
         data-form-type="other"
       ></textarea>
-      <button class="send-btn" id="sendBtn" onclick="sendMessage()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <button class="send-btn show-mic" id="sendBtn" onclick="handleSendButton()">
+        <!-- Send arrow icon -->
+        <svg class="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 19V5"/>
           <path d="M5 12l7-7 7 7"/>
+        </svg>
+        <!-- Microphone icon -->
+        <svg class="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="22"/>
         </svg>
       </button>
     </div>
@@ -984,6 +1033,7 @@
       // Optimistic UI: clear input immediately
       messageInput.value = '';
       messageInput.style.height = 'auto';
+      updateButtonState();
 
       ws.send(JSON.stringify({ type: 'send', content: message }));
     }
@@ -994,6 +1044,102 @@
       ws.send(JSON.stringify({ type: 'key', key: key }));
     }
 
+    // ============================================
+    // VOICE RECOGNITION (Web Speech API)
+    // ============================================
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    let isRecording = false;
+
+    // Check if speech recognition is supported
+    const speechSupported = !!SpeechRecognition;
+
+    // Debug: log speech support status (visible in status text briefly)
+    console.log('Speech API check:', {
+      SpeechRecognition: !!window.SpeechRecognition,
+      webkitSpeechRecognition: !!window.webkitSpeechRecognition,
+      supported: speechSupported
+    });
+
+    if (speechSupported) {
+      recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      // Auto-detect language or default to English
+      recognition.lang = navigator.language || 'en-US';
+
+      recognition.onstart = () => {
+        isRecording = true;
+        sendBtn.classList.add('recording');
+      };
+
+      recognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = 0; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        messageInput.value = transcript;
+        messageInput.dispatchEvent(new Event('input'));
+      };
+
+      recognition.onend = () => {
+        isRecording = false;
+        sendBtn.classList.remove('recording');
+        updateButtonState();
+      };
+
+      recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        isRecording = false;
+        sendBtn.classList.remove('recording');
+        updateButtonState();
+
+        // Show user-friendly error messages
+        if (event.error === 'not-allowed') {
+          alert('Microphone access denied. Please enable microphone permissions in your browser settings.');
+        } else if (event.error === 'no-speech') {
+          // No speech detected - this is normal, don't alert
+        } else if (event.error === 'network') {
+          alert('Network error during speech recognition. Please check your connection.');
+        }
+      };
+    }
+
+    // Update button to show mic or send icon based on input state
+    function updateButtonState() {
+      const hasText = messageInput.value.trim().length > 0;
+      if (hasText) {
+        sendBtn.classList.remove('show-mic');
+      } else {
+        sendBtn.classList.add('show-mic');
+      }
+    }
+
+    // Handle send button click - either send message or start/stop recording
+    function handleSendButton() {
+      const hasText = messageInput.value.trim().length > 0;
+
+      if (hasText) {
+        sendMessage();
+      } else {
+        // Try to start/stop voice recording
+        if (isRecording && recognition) {
+          recognition.stop();
+        } else if (speechSupported && recognition) {
+          try {
+            recognition.start();
+          } catch (e) {
+            console.error('Failed to start recognition:', e);
+            alert('Could not start voice input. Please try again.');
+          }
+        } else {
+          const debugInfo = `SpeechRecognition: ${!!window.SpeechRecognition}, webkitSpeechRecognition: ${!!window.webkitSpeechRecognition}`;
+          alert(`Voice input not available.\n\nDebug: ${debugInfo}\n\nIf on iOS:\n- Make sure you're in Safari (not a home screen PWA)\n- Siri must be enabled in Settings`);
+        }
+      }
+    }
 
     // ============================================
     // DYNAMIC INPUT AREA PADDING
@@ -1030,6 +1176,7 @@
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
         updateOutputPadding();
+        updateButtonState();
       });
     });
 
@@ -1169,6 +1316,9 @@
     // ============================================
     // START
     // ============================================
+    // Initialize button state (show mic if no text)
+    updateButtonState();
+
     // Fetch commands for palette on load
     fetchCommands();
 

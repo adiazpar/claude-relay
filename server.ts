@@ -1,5 +1,7 @@
 import express from 'express'
 import { createServer } from 'http'
+import { createServer as createHttpsServer } from 'https'
+import { readFileSync, existsSync } from 'fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -9,6 +11,14 @@ import { getAllCommands } from './commands.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
+// SSL certificate paths - check both project root and dist parent
+const certsInCurrentDir = path.join(__dirname, 'certs')
+const certsInParentDir = path.join(__dirname, '..', 'certs')
+const certsDir = existsSync(certsInCurrentDir) ? certsInCurrentDir : certsInParentDir
+const certPath = path.join(certsDir, 'cert.pem')
+const keyPath = path.join(certsDir, 'key.pem')
+const sslAvailable = existsSync(certPath) && existsSync(keyPath)
+
 // Split terminal output into raw ANSI lines
 // Client handles ANSI-to-HTML conversion for better performance
 function toLines(text: string): string[] {
@@ -17,10 +27,21 @@ function toLines(text: string): string[] {
 }
 
 const app = express()
-const server = createServer(app)
-const wss = new WebSocketServer({ server })
 
-const PORT = process.env.PORT || 3001
+// Create HTTP server
+const httpServer = createServer(app)
+
+// Create HTTPS server if certificates are available
+const httpsServer = sslAvailable
+  ? createHttpsServer({
+      key: readFileSync(keyPath),
+      cert: readFileSync(certPath)
+    }, app)
+  : null
+
+// WebSocket server - attach to HTTPS if available, otherwise HTTP
+const wss = new WebSocketServer({ server: httpsServer || httpServer })
+
 const HOST = process.env.HOST || '0.0.0.0' // Listen on all interfaces for Tailscale
 
 // Serve static files
@@ -34,6 +55,17 @@ app.get('/api/health', (req, res) => {
     tmuxSession: tmuxBridge.sessionExists(),
     claudeRunning: tmuxBridge.isClaudeRunning()
   })
+})
+
+// Serve SSL certificate for iOS installation
+app.get('/cert', (req, res) => {
+  if (sslAvailable) {
+    res.setHeader('Content-Type', 'application/x-x509-ca-cert')
+    res.setHeader('Content-Disposition', 'attachment; filename="claude-relay.cer"')
+    res.sendFile(certPath)
+  } else {
+    res.status(404).send('No certificate available')
+  }
 })
 
 // Get current pane content
@@ -154,27 +186,54 @@ tmuxBridge.on('output', (rawContent: string) => {
 // Start polling for output changes
 tmuxBridge.startPolling()
 
-// Start server
-server.listen(Number(PORT), HOST, () => {
+const HTTP_PORT = 3001
+const HTTPS_PORT = 3443
+
+// Always start HTTP server (for cert download and fallback)
+httpServer.listen(HTTP_PORT, HOST, () => {
+  console.log(`HTTP server on port ${HTTP_PORT}`)
+})
+
+// Start HTTPS server if available
+if (httpsServer) {
+  httpsServer.listen(HTTPS_PORT, HOST, () => {
+    console.log(`
+╔════════════════════════════════════════════════════════════╗
+║                    Claude Relay Server                     ║
+╠════════════════════════════════════════════════════════════╣
+║  HTTP:      http://100.113.9.34:${HTTP_PORT}  (no voice)          ║
+║  HTTPS:     https://100.113.9.34:${HTTPS_PORT} (voice enabled)    ║
+╠════════════════════════════════════════════════════════════╣
+║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
+║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
+╠════════════════════════════════════════════════════════════╣
+║  To enable voice on iOS:                                   ║
+║  1. Go to http://100.113.9.34:${HTTP_PORT}/cert                   ║
+║  2. Install the certificate in Settings > General >        ║
+║     VPN & Device Management                                ║
+║  3. Trust it in Settings > General > About >               ║
+║     Certificate Trust Settings                             ║
+║  4. Then visit https://100.113.9.34:${HTTPS_PORT}                 ║
+╚════════════════════════════════════════════════════════════╝
+`)
+  })
+} else {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                    Claude Relay Server                     ║
 ╠════════════════════════════════════════════════════════════╣
-║  Local:     http://localhost:${PORT}                         ║
-║  Tailscale: http://100.113.9.34:${PORT}                      ║
+║  URL: http://100.113.9.34:${HTTP_PORT}                            ║
 ╠════════════════════════════════════════════════════════════╣
-║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
-║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
+║  WARNING: No SSL certs. Voice input unavailable.           ║
 ╚════════════════════════════════════════════════════════════╝
-
-Open the Tailscale URL on your phone to chat with Claude Code!
 `)
-})
+}
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...')
   tmuxBridge.stopPolling()
-  server.close()
+  httpServer.close()
+  if (httpsServer) httpsServer.close()
   process.exit(0)
 })
