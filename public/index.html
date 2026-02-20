@@ -14,6 +14,7 @@
       overflow: hidden;
       position: fixed;
       width: 100%;
+      touch-action: none;
     }
 
     body {
@@ -27,6 +28,7 @@
       display: flex;
       flex-direction: column;
       overscroll-behavior: none;
+      touch-action: none;
     }
 
     /* Header */
@@ -115,7 +117,9 @@
       -webkit-overflow-scrolling: touch;
       position: relative;
       padding-top: 60px; /* Space for fixed header */
-      padding-bottom: 140px; /* Space for fixed input area */
+      /* padding-bottom is set dynamically by JS based on input area height */
+      touch-action: pan-y; /* Allow vertical scroll only in this container */
+      overscroll-behavior: contain; /* Prevent scroll chaining to parent */
     }
 
     .output-container::-webkit-scrollbar {
@@ -515,7 +519,6 @@
     // VIRTUAL SCROLLING FUNCTIONS
     // ============================================
     const PADDING_TOP = 60; // Space for fixed header
-    const PADDING_BOTTOM = 16;
 
     function getVisibleRange() {
       const scrollTop = output.scrollTop;
@@ -553,7 +556,9 @@
     }
 
     function updateVirtualHeight() {
-      const totalHeight = PADDING_TOP + PADDING_BOTTOM + (allLines.length * ROW_HEIGHT);
+      // Don't add PADDING_TOP here - the CSS padding-top on the container already creates that space
+      // Adding it here creates a 60px gap at the bottom of the content
+      const totalHeight = allLines.length * ROW_HEIGHT;
       virtualSpacer.style.height = totalHeight + 'px';
     }
 
@@ -580,8 +585,21 @@
     // ============================================
     // OUTPUT UPDATE FUNCTIONS
     // ============================================
+    function trimEmptyLines(lines) {
+      // Remove leading and trailing empty lines from tmux output
+      let start = 0;
+      let end = lines.length;
+      while (start < end && lines[start].trim() === '') {
+        start++;
+      }
+      while (end > start && lines[end - 1].trim() === '') {
+        end--;
+      }
+      return lines.slice(start, end);
+    }
+
     function applyLinesUpdate(lines, mode) {
-      allLines = lines;
+      allLines = trimEmptyLines(lines);
       updateVirtualHeight();
       renderVisibleLines(true); // Force re-render since content changed
       scrollToBottom();
@@ -712,6 +730,26 @@
 
 
     // ============================================
+    // DYNAMIC INPUT AREA PADDING
+    // ============================================
+    const CONTENT_GAP = 16; // Space between last line of content and input area
+
+    function updateOutputPadding() {
+      // Check if we're currently at the bottom before changing padding
+      const wasAtBottom = (output.scrollHeight - output.scrollTop - output.clientHeight) < 50;
+
+      const inputAreaHeight = inputArea.offsetHeight;
+      output.style.paddingBottom = (inputAreaHeight + CONTENT_GAP) + 'px';
+
+      // After padding changes, scroll to stay at bottom if we were there
+      if (wasAtBottom) {
+        requestAnimationFrame(() => {
+          output.scrollTop = output.scrollHeight;
+        });
+      }
+    }
+
+    // ============================================
     // EVENT LISTENERS
     // ============================================
     output.addEventListener('scroll', handleScroll, { passive: true });
@@ -721,6 +759,7 @@
       requestAnimationFrame(() => {
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+        updateOutputPadding();
       });
     });
 
@@ -770,24 +809,48 @@
     });
 
     // ============================================
-    // iOS FIXES
+    // iOS SCROLL FIXES
     // ============================================
-    // Prevent input area from being dragged on iOS
     const inputArea = document.querySelector('.input-area');
-    inputArea.addEventListener('touchmove', (e) => {
-      // Allow scrolling inside textarea if content overflows
-      if (e.target !== messageInput) {
-        e.preventDefault();
+
+    // Prevent all touch scrolling except in the output container
+    document.addEventListener('touchmove', (e) => {
+      // Allow scrolling in output container
+      if (output.contains(e.target)) {
+        // Prevent overscroll at boundaries
+        const atTop = output.scrollTop <= 0;
+        const atBottom = output.scrollTop >= output.scrollHeight - output.clientHeight;
+
+        // Get touch direction
+        if (e.touches.length === 1) {
+          const touch = e.touches[0];
+          const lastY = output._lastTouchY || touch.clientY;
+          const deltaY = touch.clientY - lastY;
+          output._lastTouchY = touch.clientY;
+
+          // Prevent scroll if at boundary and trying to scroll further
+          if ((atTop && deltaY > 0) || (atBottom && deltaY < 0)) {
+            e.preventDefault();
+          }
+        }
+        return;
       }
+
+      // Allow scrolling in textarea if it has overflow
+      if (e.target === messageInput && messageInput.scrollHeight > messageInput.clientHeight) {
+        return;
+      }
+
+      // Block all other touch scrolling
+      e.preventDefault();
     }, { passive: false });
 
-    // Prevent body scroll on iOS
-    document.body.addEventListener('touchmove', (e) => {
-      // Only allow scroll inside output container
-      if (!output.contains(e.target)) {
-        e.preventDefault();
+    // Track touch start for direction detection
+    output.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        output._lastTouchY = e.touches[0].clientY;
       }
-    }, { passive: false });
+    }, { passive: true });
 
     // ============================================
     // KEYBOARD DETECTION - Add extra padding when keyboard is closed
@@ -802,6 +865,8 @@
         // Keyboard is open if current height is significantly less than max
         const keyboardOpen = (maxViewportHeight - currentHeight) > 150;
         inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
+        // Update output padding when keyboard state changes
+        requestAnimationFrame(updateOutputPadding);
       }
     }
 
@@ -813,6 +878,9 @@
       // Fallback: assume keyboard closed on desktop/unsupported browsers
       inputArea.classList.add('keyboard-closed');
     }
+
+    // Initial padding calculation
+    requestAnimationFrame(updateOutputPadding);
 
     // ============================================
     // START
