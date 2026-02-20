@@ -151,14 +151,11 @@ export class TmuxBridge extends EventEmitter {
     return this.capturePane()
   }
 
-  // Check if Claude Code is running (look for characteristic output)
+  // Check if Claude Code is running (look for the mode indicator unique to Claude Code UI)
   isClaudeRunning(): boolean {
     const output = this.capturePane(50)
-    // Look for Claude Code indicators
-    return output.includes('Claude') ||
-           output.includes('bypass permissions') ||
-           output.includes('Opus') ||
-           output.includes('Sonnet')
+    // Look for Claude Code's mode selector "(shift+tab to cycle)" which is unique to its UI
+    return /shift\+tab/i.test(output)
   }
 
   // Detect current Claude Code permission mode from output
