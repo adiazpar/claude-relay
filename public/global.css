@@ -2,23 +2,23 @@
    GLOBAL STYLES - Claude Relay
    ============================================ */
 
-/* CSS Variables */
+/* CSS Variables - Claude color scheme */
 :root {
-  --bg-primary: #0f0f1a;
-  --bg-secondary: #1a1a2e;
-  --bg-tertiary: #252542;
-  --bg-input: #1e1e32;
-  --text-primary: #f0f0f5;
-  --text-secondary: #8888a0;
-  --text-muted: #5a5a70;
-  --accent: #6366f1;
-  --accent-glow: rgba(99, 102, 241, 0.3);
-  --accent-hover: #818cf8;
+  --bg-primary: #1a1915;
+  --bg-secondary: #242320;
+  --bg-tertiary: #2e2d29;
+  --bg-input: #222118;
+  --text-primary: #f5f4f0;
+  --text-secondary: #a8a69e;
+  --text-muted: #6a6860;
+  --accent: #D77655;
+  --accent-glow: rgba(215, 118, 85, 0.3);
+  --accent-hover: #E08B6D;
   --success: #10b981;
   --success-glow: rgba(16, 185, 129, 0.2);
   --error: #ef4444;
-  --border: #2a2a45;
-  --border-light: #3a3a55;
+  --border: #3a382f;
+  --border-light: #4a483f;
   --shadow: rgba(0, 0, 0, 0.3);
 }
 
@@ -48,9 +48,9 @@ button:active {
   right: 0;
   background: linear-gradient(
     to top,
-    rgba(15, 15, 26, 0) 0%,
-    rgba(15, 15, 26, 0.8) 30%,
-    rgba(15, 15, 26, 1) 60%
+    rgba(26, 25, 21, 0) 0%,
+    rgba(26, 25, 21, 0.8) 30%,
+    rgba(26, 25, 21, 1) 60%
   );
   z-index: 50;
   -webkit-transform: translateZ(0);
@@ -65,9 +65,9 @@ button:active {
   right: 0;
   background: linear-gradient(
     to bottom,
-    rgba(15, 15, 26, 0) 0%,
-    rgba(15, 15, 26, 0.8) 30%,
-    rgba(15, 15, 26, 1) 60%
+    rgba(26, 25, 21, 0) 0%,
+    rgba(26, 25, 21, 0.8) 30%,
+    rgba(26, 25, 21, 1) 60%
   );
   z-index: 50;
   -webkit-transform: translateZ(0);
