@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { tmuxBridge } from './tmux-bridge.js'
+import { getAllCommands } from './commands.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -39,6 +40,17 @@ app.get('/api/health', (req, res) => {
 app.get('/api/output', (req, res) => {
   const output = tmuxBridge.getFullOutput()
   res.json({ output })
+})
+
+// Get available slash commands
+app.get('/api/commands', async (req, res) => {
+  try {
+    const commands = await getAllCommands()
+    res.json({ commands })
+  } catch (error) {
+    console.error('Error fetching commands:', error)
+    res.status(500).json({ error: 'Failed to fetch commands' })
+  }
 })
 
 // Send message via REST (fallback)

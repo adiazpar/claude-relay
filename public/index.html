@@ -304,6 +304,158 @@
       cursor: not-allowed;
     }
 
+    /* Command palette button */
+    .commands-btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    @media (hover: hover) {
+      .commands-btn:hover {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+        background: rgba(215, 118, 85, 0.1);
+      }
+    }
+
+    .commands-btn:active {
+      transform: scale(0.97);
+    }
+
+    .commands-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(215, 118, 85, 0.15);
+    }
+
+    /* Command palette drawer - using grid for smooth height animation */
+    .command-palette {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
+      opacity: 0;
+      margin-bottom: 0;
+    }
+
+    .command-palette.open {
+      grid-template-rows: 1fr;
+      opacity: 1;
+      margin-bottom: 10px;
+    }
+
+    .command-palette-inner {
+      overflow: hidden;
+    }
+
+    .command-palette-content {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      /* Max height is set dynamically by JS to account for keyboard and input height */
+      max-height: 300px;
+    }
+
+    .command-search {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .command-search input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-input);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .command-search input:focus {
+      border-color: var(--accent);
+    }
+
+    .command-search input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .command-list {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 8px 0;
+    }
+
+    .command-list::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .command-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .command-list::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    .command-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+
+    @media (hover: hover) {
+      .command-item:hover {
+        background: var(--bg-tertiary);
+      }
+    }
+
+    .command-item:active {
+      background: var(--bg-tertiary);
+    }
+
+    .command-name {
+      font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .command-description {
+      font-size: 13px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .command-empty {
+      padding: 20px 14px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
   </style>
 </head>
 <body>
@@ -353,6 +505,18 @@
         </svg>
         <span>Change mode</span>
       </button>
+      <button class="commands-btn" id="commandsBtn" onclick="toggleCommandPalette()" title="Slash Commands">/</button>
+    </div>
+    <!-- Command palette drawer -->
+    <div class="command-palette" id="commandPalette">
+      <div class="command-palette-inner">
+        <div class="command-palette-content" id="commandPaletteContent">
+          <div class="command-search">
+            <input type="text" id="commandSearch" placeholder="Search commands..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div class="command-list" id="commandList"></div>
+        </div>
+      </div>
     </div>
     <!-- Input row -->
     <div class="input-row">
@@ -495,6 +659,11 @@
     const sendBtn = document.getElementById('sendBtn');
     const statusDot = document.getElementById('statusDot');
     const statusText = document.getElementById('statusText');
+    const commandPalette = document.getElementById('commandPalette');
+    const commandPaletteContent = document.getElementById('commandPaletteContent');
+    const commandSearch = document.getElementById('commandSearch');
+    const commandList = document.getElementById('commandList');
+    const commandsBtn = document.getElementById('commandsBtn');
 
     // ============================================
     // VIRTUAL SCROLLING STATE
@@ -515,7 +684,170 @@
     let lastCols = 0;
     let resizeTimeout = null;
 
+    // ============================================
+    // MOBILE DETECTION
+    // ============================================
+    // Detect if this is a real mobile touch device (not desktop with touch screen)
+    function isMobileDevice() {
+      // Check for touch capability AND small screen (rules out touch laptops)
+      const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      const isSmallScreen = window.innerWidth <= 768;
+      // Also check user agent for mobile keywords
+      const mobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      return hasTouch && (isSmallScreen || mobileUA);
+    }
 
+    const isMobile = isMobileDevice();
+
+    // ============================================
+    // COMMAND PALETTE STATE
+    // ============================================
+    let allCommands = [];
+    let filteredCommands = [];
+    let paletteOpen = false;
+
+    // Fetch commands from server
+    async function fetchCommands() {
+      try {
+        const res = await fetch('/api/commands');
+        const data = await res.json();
+        allCommands = data.commands || [];
+        filteredCommands = allCommands;
+      } catch (error) {
+        console.error('Failed to fetch commands:', error);
+        allCommands = [];
+        filteredCommands = [];
+      }
+    }
+
+    // Update palette max-height based on available space
+    function updatePaletteHeight() {
+      const headerHeight = 60;
+      const shortcutsHeight = 38;
+      const inputRowHeight = document.querySelector('.input-row').offsetHeight;
+      const paletteMargin = 20; // padding/margin allowance
+
+      // Use visual viewport if available (accounts for keyboard on mobile)
+      const viewportHeight = (isMobile && window.visualViewport) ? window.visualViewport.height : window.innerHeight;
+
+      // Calculate available space: viewport - header - shortcuts - input row - margins
+      const availableHeight = viewportHeight - headerHeight - shortcutsHeight - inputRowHeight - paletteMargin - 60;
+
+      // Cap between 150px and 400px
+      const maxHeight = Math.max(150, Math.min(400, availableHeight));
+      commandPaletteContent.style.maxHeight = maxHeight + 'px';
+    }
+
+    // Render command list
+    function renderCommands() {
+      if (filteredCommands.length === 0) {
+        commandList.innerHTML = '<div class="command-empty">No commands found</div>';
+        return;
+      }
+
+      commandList.innerHTML = filteredCommands.map(cmd => `
+        <div class="command-item" data-command="${cmd.name}">
+          <span class="command-name">/${cmd.name}</span>
+          <span class="command-description">${cmd.description}</span>
+        </div>
+      `).join('');
+
+      // Add click handlers
+      commandList.querySelectorAll('.command-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const cmdName = item.dataset.command;
+          selectCommand(cmdName);
+        });
+      });
+    }
+
+    // Filter commands based on search input
+    function filterCommands(query) {
+      const q = query.toLowerCase().replace(/^\//, '');
+      if (!q) {
+        filteredCommands = allCommands;
+      } else {
+        filteredCommands = allCommands.filter(cmd =>
+          cmd.name.toLowerCase().includes(q) ||
+          cmd.description.toLowerCase().includes(q)
+        );
+      }
+      renderCommands();
+    }
+
+    // Select a command and fill input
+    function selectCommand(cmdName) {
+      messageInput.value = '/' + cmdName + ' ';
+      messageInput.focus();
+      // Trigger input event to resize textarea
+      messageInput.dispatchEvent(new Event('input'));
+      closeCommandPalette();
+    }
+
+    // Toggle palette open/close
+    function toggleCommandPalette() {
+      if (paletteOpen) {
+        closeCommandPalette();
+      } else {
+        openCommandPalette();
+      }
+    }
+
+    // Open palette
+    function openCommandPalette() {
+      paletteOpen = true;
+      commandPalette.classList.add('open');
+      commandsBtn.classList.add('active');
+      commandSearch.value = '';
+      filterCommands('');
+      updatePaletteHeight();
+      updateOutputPadding();
+      // Focus search input after a brief delay for animation
+      setTimeout(() => commandSearch.focus(), 50);
+    }
+
+    // Close palette
+    function closeCommandPalette() {
+      paletteOpen = false;
+      commandPalette.classList.remove('open');
+      commandsBtn.classList.remove('active');
+      // Wait for the 200ms grid animation to complete before updating padding
+      setTimeout(() => updateOutputPadding(), 220);
+    }
+
+    // Command search input handler
+    commandSearch.addEventListener('input', (e) => {
+      filterCommands(e.target.value);
+    });
+
+    // Handle escape key in search input
+    commandSearch.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeCommandPalette();
+        messageInput.focus();
+      } else if (e.key === 'Enter') {
+        // Select first command if available
+        if (filteredCommands.length > 0) {
+          selectCommand(filteredCommands[0].name);
+        }
+      }
+    });
+
+    // Close palette when clicking outside
+    document.addEventListener('click', (e) => {
+      if (paletteOpen && !commandPalette.contains(e.target) && e.target !== commandsBtn) {
+        closeCommandPalette();
+      }
+    });
+
+    // Update palette height on viewport changes (keyboard open/close)
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => {
+        if (paletteOpen) {
+          updatePaletteHeight();
+        }
+      });
+    }
 
     // ============================================
     // VIRTUAL SCROLLING FUNCTIONS
@@ -842,6 +1174,11 @@
         return;
       }
 
+      // Allow scrolling in command list
+      if (commandList.contains(e.target)) {
+        return;
+      }
+
       // Allow scrolling in textarea if it has overflow
       if (e.target === messageInput && messageInput.scrollHeight > messageInput.clientHeight) {
         return;
@@ -860,10 +1197,17 @@
 
     // ============================================
     // KEYBOARD DETECTION - Add extra padding when keyboard is closed
+    // Only applies on actual mobile touch devices, not desktop with mobile viewport
     // ============================================
     let maxViewportHeight = 0;
 
     function updateKeyboardState() {
+      // Only do keyboard detection on actual mobile devices
+      if (!isMobile) {
+        inputArea.classList.add('keyboard-closed');
+        return;
+      }
+
       if (window.visualViewport) {
         const currentHeight = window.visualViewport.height;
         // Track max height (represents keyboard closed state)
@@ -876,14 +1220,14 @@
       }
     }
 
-    if (window.visualViewport) {
+    if (isMobile && window.visualViewport) {
       window.visualViewport.addEventListener('resize', updateKeyboardState);
       // Also listen to scroll events on visualViewport for keyboard transitions
       window.visualViewport.addEventListener('scroll', () => updateOutputPadding(true));
       // Initial state
       updateKeyboardState();
     } else {
-      // Fallback: assume keyboard closed on desktop/unsupported browsers
+      // Desktop or unsupported browsers: always use keyboard-closed padding
       inputArea.classList.add('keyboard-closed');
     }
 
@@ -893,6 +1237,9 @@
     // ============================================
     // START
     // ============================================
+    // Fetch commands for palette on load
+    fetchCommands();
+
     // Fetch initial content immediately via REST while WebSocket connects
     fetch('/api/output')
       .then(res => res.json())
