@@ -203,6 +203,12 @@
       padding: 24px 16px 12px;
       padding-bottom: calc(12px + env(safe-area-inset-bottom));
       touch-action: none; /* Prevent dragging */
+      transition: padding-bottom 0.15s ease;
+    }
+
+    /* Extra padding when keyboard is closed */
+    .input-area.keyboard-closed {
+      padding-bottom: calc(28px + env(safe-area-inset-bottom));
     }
 
     /* Shortcuts row above textarea */
@@ -786,13 +792,28 @@
     // ============================================
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        // User returned to app - check connection and reconnect if needed
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          connect();
-        } else {
-          // Connection is open, request fresh output
-          refreshOutput();
+        // Immediately show connected status - don't flash "Reconnecting"
+        // WebSocket will update status if it actually fails
+        connected = true;
+        updateStatus();
+
+        // iOS kills WebSocket connections in background but readyState may lie
+        // Always fetch content via REST immediately and force reconnect
+        fetch('/api/output')
+          .then(res => res.json())
+          .then(data => {
+            if (data.output) {
+              applyLinesUpdate(data.output.split('\n'), null);
+            }
+          })
+          .catch(() => {});
+
+        // Force close and reconnect - don't trust existing connection state
+        if (ws) {
+          ws.onclose = null; // Prevent auto-reconnect from old socket
+          ws.close();
         }
+        connect();
       }
     });
 
@@ -815,6 +836,31 @@
         e.preventDefault();
       }
     }, { passive: false });
+
+    // ============================================
+    // KEYBOARD DETECTION - Add extra padding when keyboard is closed
+    // ============================================
+    let maxViewportHeight = 0;
+
+    function updateKeyboardState() {
+      if (window.visualViewport) {
+        const currentHeight = window.visualViewport.height;
+        // Track max height (represents keyboard closed state)
+        maxViewportHeight = Math.max(maxViewportHeight, currentHeight);
+        // Keyboard is open if current height is significantly less than max
+        const keyboardOpen = (maxViewportHeight - currentHeight) > 150;
+        inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
+      }
+    }
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', updateKeyboardState);
+      // Initial state
+      updateKeyboardState();
+    } else {
+      // Fallback: assume keyboard closed on desktop/unsupported browsers
+      inputArea.classList.add('keyboard-closed');
+    }
 
     // ============================================
     // START
