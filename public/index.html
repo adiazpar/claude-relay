@@ -750,68 +750,71 @@
       font-size: 13px;
     }
 
-    /* Language drawer - similar to command palette */
-    .language-drawer {
-      display: grid;
-      grid-template-rows: 0fr;
-      transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
-      opacity: 0;
-      margin-bottom: 0;
+    /* Language action sheet */
+    .language-action-sheet {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 200;
+      transform: translateY(100%);
+      transition: transform 0.25s ease-out;
     }
 
-    .language-drawer.open {
-      grid-template-rows: 1fr;
-      opacity: 1;
-      margin-bottom: 10px;
+    .language-action-sheet.open {
+      transform: translateY(0);
     }
 
-    .language-drawer-inner {
-      overflow: hidden;
-    }
-
-    .language-drawer-content {
+    .language-action-sheet-content {
       background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 8px;
+      border-top-left-radius: 16px;
+      border-top-right-radius: 16px;
+      padding: 16px;
+      padding-bottom: calc(16px + env(safe-area-inset-bottom));
     }
 
-    .language-drawer-title {
-      font-size: 11px;
-      font-weight: 500;
+    .language-action-sheet-header {
+      text-align: center;
+      padding-bottom: 12px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .language-action-sheet-title {
+      font-size: 13px;
       color: var(--text-secondary);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      padding: 4px 8px 4px;
+      margin-bottom: 4px;
     }
 
-    .language-drawer-desc {
-      font-size: 12px;
-      color: var(--text-muted);
-      padding: 0 8px 10px;
+    .language-action-sheet-current {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
     }
 
     .language-list {
       display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
       gap: 8px;
+      max-height: 300px;
+      overflow-y: auto;
     }
 
     .language-item {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 8px 12px;
+      gap: 12px;
+      padding: 14px 16px;
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 12px;
       cursor: pointer;
       transition: all 0.15s ease;
-      font-size: 13px;
+      font-size: 15px;
     }
 
     .language-item:active {
-      transform: scale(0.97);
+      transform: scale(0.98);
     }
 
     .language-item.selected {
@@ -819,17 +822,29 @@
       background: rgba(215, 118, 85, 0.15);
     }
 
+    @media (hover: hover) {
+      .language-item:hover {
+        border-color: var(--accent);
+        background: rgba(215, 118, 85, 0.1);
+      }
+    }
+
     .language-flag {
-      font-size: 16px;
+      font-size: 20px;
     }
 
     .language-name {
       color: var(--text-primary);
+      flex: 1;
     }
 
-    .language-code {
-      color: var(--text-secondary);
-      font-size: 11px;
+    .language-check {
+      color: var(--accent);
+      opacity: 0;
+    }
+
+    .language-item.selected .language-check {
+      opacity: 1;
     }
 
   </style>
@@ -871,6 +886,18 @@
     </div>
   </div>
 
+  <!-- Language action sheet -->
+  <div class="tab-action-sheet-backdrop" id="languageActionBackdrop"></div>
+  <div class="language-action-sheet" id="languageActionSheet">
+    <div class="language-action-sheet-content">
+      <div class="language-action-sheet-header">
+        <div class="language-action-sheet-title">Voice Language</div>
+        <div class="language-action-sheet-current" id="languageActionCurrent"></div>
+      </div>
+      <div class="language-list" id="languageList"></div>
+    </div>
+  </div>
+
   <div class="input-area fixed-bar-bottom">
     <!-- Shortcuts row -->
     <div class="shortcuts-row">
@@ -904,16 +931,6 @@
       <div class="command-palette-inner">
         <div class="command-palette-content" id="commandPaletteContent">
           <div class="command-list" id="commandList"></div>
-        </div>
-      </div>
-    </div>
-    <!-- Language drawer -->
-    <div class="language-drawer" id="languageDrawer">
-      <div class="language-drawer-inner">
-        <div class="language-drawer-content">
-          <div class="language-drawer-title">Voice Language</div>
-          <div class="language-drawer-desc">Choose the language you'll speak into the microphone</div>
-          <div class="language-list" id="languageList"></div>
         </div>
       </div>
     </div>
@@ -1947,25 +1964,24 @@
       { code: 'ko-KR', name: 'Korean', flag: '🇰🇷' },
     ];
 
-    // Language drawer state
-    const languageDrawer = document.getElementById('languageDrawer');
+    // Language action sheet state
+    const languageActionSheet = document.getElementById('languageActionSheet');
+    const languageActionBackdrop = document.getElementById('languageActionBackdrop');
+    const languageActionCurrent = document.getElementById('languageActionCurrent');
     const languageList = document.getElementById('languageList');
-    let languageDrawerOpen = false;
+    let languageSheetOpen = false;
     let selectedLanguage = languages[0]; // Default to English
-
-    // Debug: log speech support status
-    console.log('Speech API check:', {
-      SpeechRecognition: !!window.SpeechRecognition,
-      webkitSpeechRecognition: !!window.webkitSpeechRecognition,
-      supported: speechSupported
-    });
 
     // Render language options
     function renderLanguages() {
+      languageActionCurrent.textContent = `${selectedLanguage.flag} ${selectedLanguage.name}`;
       languageList.innerHTML = languages.map(lang => `
         <div class="language-item ${lang.code === selectedLanguage.code ? 'selected' : ''}" data-code="${lang.code}">
           <span class="language-flag">${lang.flag}</span>
           <span class="language-name">${lang.name}</span>
+          <svg class="language-check" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
         </div>
       `).join('');
 
@@ -1981,32 +1997,33 @@
       });
     }
 
-    // Open language drawer
-    function openLanguageDrawer() {
+    // Open language action sheet
+    function openLanguageSheet() {
       if (!speechSupported) {
-        const debugInfo = `SpeechRecognition: ${!!window.SpeechRecognition}, webkitSpeechRecognition: ${!!window.webkitSpeechRecognition}`;
-        alert(`Voice input not available.\n\nDebug: ${debugInfo}\n\nIf on iOS:\n- Make sure you're in Safari (not a home screen PWA)\n- Siri must be enabled in Settings`);
+        alert(`Voice input not available.\n\nIf on iOS:\n- Make sure you're in Safari (not a home screen PWA)\n- Siri must be enabled in Settings`);
         return;
       }
-      languageDrawerOpen = true;
-      languageDrawer.classList.add('open');
-      closeCommandPalette(); // Close command palette if open
+      languageSheetOpen = true;
+      languageActionSheet.classList.add('open');
+      languageActionBackdrop.classList.add('open');
       renderLanguages();
-      updateOutputPadding();
     }
 
-    // Close language drawer
-    function closeLanguageDrawer() {
-      languageDrawerOpen = false;
-      languageDrawer.classList.remove('open');
-      setTimeout(() => updateOutputPadding(), 220);
+    // Close language action sheet
+    function closeLanguageSheet() {
+      languageSheetOpen = false;
+      languageActionSheet.classList.remove('open');
+      languageActionBackdrop.classList.remove('open');
     }
 
-    // Select language (just saves selection, doesn't start recording)
+    // Select language
     function selectLanguage(lang) {
       selectedLanguage = lang;
-      closeLanguageDrawer();
+      closeLanguageSheet();
     }
+
+    // Close language sheet when clicking backdrop
+    languageActionBackdrop.addEventListener('click', closeLanguageSheet);
 
     // Start recording in specified language
     function startRecording(langCode) {
@@ -2059,12 +2076,6 @@
       }
     }
 
-    // Close language drawer when clicking outside
-    document.addEventListener('click', (e) => {
-      if (languageDrawerOpen && !languageDrawer.contains(e.target) && e.target !== sendBtn && !sendBtn.contains(e.target)) {
-        closeLanguageDrawer();
-      }
-    });
 
     // Update button to show mic or send icon based on input state
     // In PWA mode, always show send icon (voice doesn't work in iOS PWA)
@@ -2091,7 +2102,7 @@
       longPressTimer = setTimeout(() => {
         isLongPress = true;
         triggerHaptic();
-        openLanguageDrawer();
+        openLanguageSheet();
       }, LONG_PRESS_DURATION);
     }, { passive: true });
 
@@ -2114,8 +2125,8 @@
       // No text, not recording
       if (!isLongPress) {
         e.preventDefault();
-        if (languageDrawerOpen) {
-          closeLanguageDrawer();
+        if (languageSheetOpen) {
+          closeLanguageSheet();
         } else {
           startRecording(selectedLanguage.code);
         }
