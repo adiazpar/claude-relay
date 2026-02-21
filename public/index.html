@@ -87,6 +87,10 @@
       gap: 6px;
       flex-shrink: 0;
       color: var(--text-secondary);
+      /* Prevent text selection on long press */
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      user-select: none;
     }
 
     .pane-tab:active {
