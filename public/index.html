@@ -798,6 +798,9 @@
       gap: 8px;
       max-height: 300px;
       overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
     }
 
     .language-item {
@@ -811,6 +814,9 @@
       cursor: pointer;
       transition: all 0.15s ease;
       font-size: 15px;
+      touch-action: pan-y;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     .language-item:active {
@@ -2157,13 +2163,15 @@
       const wasAtBottom = forceScroll || (output.scrollHeight - output.scrollTop - output.clientHeight) < 50;
 
       const inputAreaHeight = inputArea.offsetHeight;
-      output.style.paddingBottom = (inputAreaHeight + CONTENT_GAP) + 'px';
+      // Account for input area's bottom position (keyboard pushes it up)
+      const inputAreaBottom = parseInt(inputArea.style.bottom) || 0;
+      output.style.paddingBottom = (inputAreaHeight + inputAreaBottom + CONTENT_GAP) + 'px';
 
-      // After padding changes, scroll smoothly during the 150ms transition
+      // After padding changes, scroll to keep content visible
       if (wasAtBottom) {
         const scrollToEnd = () => { output.scrollTop = output.scrollHeight; };
         scrollToEnd();
-        // Follow the transition with multiple updates
+        // Follow any transitions with multiple updates
         requestAnimationFrame(scrollToEnd);
         setTimeout(scrollToEnd, 50);
         setTimeout(scrollToEnd, 100);
@@ -2234,7 +2242,7 @@
     // ============================================
     const inputArea = document.querySelector('.input-area');
 
-    // Prevent all touch scrolling except in the output container
+    // Prevent all touch scrolling except in specific containers
     document.addEventListener('touchmove', (e) => {
       // Allow scrolling in output container
       if (output.contains(e.target)) {
@@ -2259,6 +2267,11 @@
 
       // Allow scrolling in command list
       if (commandList.contains(e.target)) {
+        return;
+      }
+
+      // Allow scrolling in language list
+      if (languageList.contains(e.target)) {
         return;
       }
 
