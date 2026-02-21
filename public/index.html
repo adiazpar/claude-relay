@@ -1337,6 +1337,9 @@
       // Request output for this pane via WebSocket
       if (ws && connected) {
         ws.send(JSON.stringify({ type: 'switchPane', paneId }));
+        // Force resize the new window to match phone width
+        lastCols = 0; // Reset so sendResize() will send
+        sendResize();
       }
 
       // Fetch commands for this pane's cwd
