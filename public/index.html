@@ -1605,26 +1605,6 @@
     // ============================================
     // HAPTIC FEEDBACK
     // ============================================
-    // Hidden checkbox for iOS 18+ haptic feedback workaround
-    let hapticCheckbox = null;
-    let hapticLabel = null;
-
-    function initHaptics() {
-      // Create hidden switch checkbox for iOS haptic workaround
-      hapticCheckbox = document.createElement('input');
-      hapticCheckbox.type = 'checkbox';
-      hapticCheckbox.setAttribute('switch', '');
-      hapticCheckbox.id = 'haptic-trigger';
-      hapticCheckbox.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0;pointer-events:none;';
-
-      hapticLabel = document.createElement('label');
-      hapticLabel.htmlFor = 'haptic-trigger';
-      hapticLabel.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0;pointer-events:none;';
-
-      document.body.appendChild(hapticCheckbox);
-      document.body.appendChild(hapticLabel);
-    }
-
     function triggerHaptic() {
       // Try Vibration API first (Android)
       if (navigator.vibrate) {
@@ -1632,14 +1612,25 @@
         return;
       }
 
-      // iOS 18+ workaround: toggle hidden switch checkbox
-      if (hapticLabel) {
-        hapticLabel.click();
+      // iOS 18+ workaround: create switch checkbox, click it, remove it
+      // Based on https://github.com/tijnjh/ios-haptics
+      try {
+        const label = document.createElement('label');
+        label.style.display = 'none';
+        label.ariaHidden = 'true';
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.setAttribute('switch', '');
+        label.appendChild(input);
+
+        document.head.appendChild(label);
+        label.click();
+        document.head.removeChild(label);
+      } catch (e) {
+        // Silently fail if haptics not supported
       }
     }
-
-    // Initialize haptics on load
-    initHaptics();
 
     // ============================================
     // TAB ACTION SHEET
