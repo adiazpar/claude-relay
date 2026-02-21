@@ -120,7 +120,6 @@
       /* padding-bottom is set dynamically by JS based on input area height */
       touch-action: pan-y; /* Allow vertical scroll only in this container */
       overscroll-behavior: contain; /* Prevent scroll chaining to parent */
-      transition: padding-bottom 0.15s ease; /* Smooth adjustment with keyboard */
     }
 
     .output-container::-webkit-scrollbar {
@@ -173,7 +172,6 @@
       padding: 24px 16px 12px;
       padding-bottom: calc(12px + env(safe-area-inset-bottom));
       touch-action: none; /* Prevent dragging */
-      transition: padding-bottom 0.15s ease;
     }
 
     /* Extra padding when keyboard is closed */
@@ -1479,6 +1477,7 @@
     // Only applies on actual mobile touch devices, not desktop with mobile viewport
     // ============================================
     let maxViewportHeight = 0;
+    let lastKeyboardState = null;
 
     function updateKeyboardState() {
       // Only do keyboard detection on actual mobile devices
@@ -1493,16 +1492,19 @@
         maxViewportHeight = Math.max(maxViewportHeight, currentHeight);
         // Keyboard is open if current height is significantly less than max
         const keyboardOpen = (maxViewportHeight - currentHeight) > 150;
-        inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
-        // Update output padding and force scroll to maintain consistent spacing
-        updateOutputPadding(true);
+
+        // Only update if state actually changed
+        if (lastKeyboardState !== keyboardOpen) {
+          lastKeyboardState = keyboardOpen;
+          inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
+          // Update padding immediately (no CSS transition to wait for)
+          updateOutputPadding(true);
+        }
       }
     }
 
     if (isMobile && window.visualViewport) {
       window.visualViewport.addEventListener('resize', updateKeyboardState);
-      // Also listen to scroll events on visualViewport for keyboard transitions
-      window.visualViewport.addEventListener('scroll', () => updateOutputPadding(true));
       // Initial state
       updateKeyboardState();
     } else {
