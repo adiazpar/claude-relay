@@ -775,6 +775,19 @@
     const commandsBtn = document.getElementById('commandsBtn');
 
     // ============================================
+    // PWA DETECTION
+    // ============================================
+    // Detect if running as installed PWA (standalone mode)
+    // Voice input doesn't work in iOS PWA mode due to WebKit limitations
+    const isPWA = window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone === true  // iOS Safari
+      || document.referrer.includes('android-app://');
+
+    if (isPWA) {
+      console.log('Running in PWA mode - voice input disabled');
+    }
+
+    // ============================================
     // VIRTUAL SCROLLING STATE
     // ============================================
     const ROW_HEIGHT = 16.8; // 12px font * 1.4 line-height
@@ -1277,21 +1290,24 @@
     });
 
     // Update button to show mic or send icon based on input state
+    // In PWA mode, always show send icon (voice doesn't work in iOS PWA)
     function updateButtonState() {
       const hasText = messageInput.value.trim().length > 0;
-      if (hasText) {
+      if (hasText || isPWA) {
         sendBtn.classList.remove('show-mic');
       } else {
         sendBtn.classList.add('show-mic');
       }
     }
 
-    // Long-press detection for mic button
+    // Long-press detection for mic button (disabled in PWA mode)
     let longPressTimer = null;
     let isLongPress = false;
     const LONG_PRESS_DURATION = 400; // ms
 
     sendBtn.addEventListener('touchstart', (e) => {
+      // Skip voice features in PWA mode
+      if (isPWA) return;
       // Allow long-press for language selection when not recording and no text
       if (isRecording || messageInput.value.trim().length > 0) return;
       isLongPress = false;
@@ -1303,6 +1319,9 @@
 
     sendBtn.addEventListener('touchend', (e) => {
       clearTimeout(longPressTimer);
+
+      // Skip voice features in PWA mode
+      if (isPWA) return;
 
       // If recording, always allow stopping
       if (isRecording && recognition) {
@@ -1514,6 +1533,57 @@
 
     // Initial padding calculation
     updateOutputPadding();
+
+    // ============================================
+    // LOCAL STORAGE PERSISTENCE
+    // ============================================
+    const STORAGE_KEYS = {
+      inputText: 'claude-relay-input',
+      language: 'claude-relay-language'
+    };
+
+    // Restore input text from localStorage
+    const savedInput = localStorage.getItem(STORAGE_KEYS.inputText);
+    if (savedInput) {
+      messageInput.value = savedInput;
+      messageInput.style.height = 'auto';
+      messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+    }
+
+    // Restore selected language from localStorage
+    const savedLang = localStorage.getItem(STORAGE_KEYS.language);
+    if (savedLang) {
+      const lang = languages.find(l => l.code === savedLang);
+      if (lang) selectedLanguage = lang;
+    }
+
+    // Save input text on change (debounced)
+    let inputSaveTimer = null;
+    messageInput.addEventListener('input', () => {
+      clearTimeout(inputSaveTimer);
+      inputSaveTimer = setTimeout(() => {
+        const text = messageInput.value;
+        if (text) {
+          localStorage.setItem(STORAGE_KEYS.inputText, text);
+        } else {
+          localStorage.removeItem(STORAGE_KEYS.inputText);
+        }
+      }, 300);
+    });
+
+    // Clear saved input when message is sent
+    const originalSendMessage = sendMessage;
+    sendMessage = function() {
+      localStorage.removeItem(STORAGE_KEYS.inputText);
+      originalSendMessage();
+    };
+
+    // Save language when changed
+    const originalSelectLanguage = selectLanguage;
+    selectLanguage = function(lang) {
+      localStorage.setItem(STORAGE_KEYS.language, lang.code);
+      originalSelectLanguage(lang);
+    };
 
     // ============================================
     // START
