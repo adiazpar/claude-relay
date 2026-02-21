@@ -1605,10 +1605,13 @@
     // ============================================
     // HAPTIC FEEDBACK
     // ============================================
+    let hapticDebugInfo = '';
+
     function triggerHaptic() {
       // Try Vibration API first (Android)
       if (navigator.vibrate) {
         navigator.vibrate(10);
+        hapticDebugInfo = 'Vibration API used';
         return;
       }
 
@@ -1627,8 +1630,9 @@
         document.head.appendChild(label);
         label.click();
         document.head.removeChild(label);
+        hapticDebugInfo = 'iOS checkbox workaround used';
       } catch (e) {
-        // Silently fail if haptics not supported
+        hapticDebugInfo = 'Haptic error: ' + e.message;
       }
     }
 
@@ -1650,6 +1654,12 @@
       const customName = localStorage.getItem(STORAGE_KEYS.tabName(paneId));
       const displayName = customName || dirName;
       tabActionName.textContent = displayName;
+
+      // Show debug info
+      const debugEl = document.createElement('div');
+      debugEl.style.cssText = 'font-size:10px;color:#888;margin-top:4px;';
+      debugEl.textContent = hapticDebugInfo || 'No haptic triggered';
+      tabActionName.parentElement.appendChild(debugEl);
 
       // Build options
       const canClose = allPanes.length > 1;
