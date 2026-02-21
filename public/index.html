@@ -45,6 +45,63 @@
       z-index: 50;
     }
 
+    /* Pane tabs */
+    .pane-tabs {
+      position: fixed;
+      top: 60px;
+      left: 0;
+      right: 0;
+      display: flex;
+      gap: 4px;
+      padding: 8px 16px;
+      background: var(--bg-primary);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      z-index: 49;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .pane-tabs::-webkit-scrollbar {
+      display: none;
+    }
+
+    .pane-tabs.hidden {
+      display: none;
+    }
+
+    .pane-tab {
+      padding: 6px 12px;
+      border-radius: 6px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .pane-tab:active {
+      transform: scale(0.97);
+    }
+
+    .pane-tab.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .pane-tab-name {
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .header-left {
       display: flex;
       align-items: center;
@@ -116,10 +173,14 @@
       color: #e6edf3;
       -webkit-overflow-scrolling: touch;
       position: relative;
-      padding-top: 60px; /* Space for fixed header */
+      padding-top: 60px; /* Space for fixed header - adjusted by JS when tabs visible */
       /* padding-bottom is set dynamically by JS based on input area height */
       touch-action: pan-y; /* Allow vertical scroll only in this container */
       overscroll-behavior: contain; /* Prevent scroll chaining to parent */
+    }
+
+    .output-container.with-tabs {
+      padding-top: 104px; /* 60px header + 44px tabs */
     }
 
     .output-container::-webkit-scrollbar {
@@ -570,6 +631,8 @@
     </div>
   </div>
 
+  <div class="pane-tabs hidden" id="paneTabs"></div>
+
   <div class="output-container" id="output">
     <div class="virtual-spacer" id="virtualSpacer"></div>
     <div class="virtual-content" id="virtualContent"></div>
@@ -773,6 +836,29 @@
     const commandPaletteContent = document.getElementById('commandPaletteContent');
     const commandList = document.getElementById('commandList');
     const commandsBtn = document.getElementById('commandsBtn');
+    const paneTabs = document.getElementById('paneTabs');
+
+    // ============================================
+    // PANE STATE MANAGEMENT
+    // ============================================
+    // Per-pane state class
+    class PaneState {
+      constructor(paneId, cwd) {
+        this.paneId = paneId;
+        this.cwd = cwd;
+        this.inputText = '';
+        this.selectedLanguage = null;  // Set to languages[0] when restored
+        this.allLines = [];
+        this.commands = [];
+        this.scrollPosition = 0;
+      }
+    }
+
+    // Global pane state
+    let paneStates = new Map();  // paneId -> PaneState
+    let activePaneId = null;
+    let activePaneTarget = null;
+    let allPanes = [];  // List of all panes from server
 
     // ============================================
     // PWA DETECTION
@@ -793,7 +879,14 @@
     const ROW_HEIGHT = 16.8; // 12px font * 1.4 line-height
     const BUFFER_ROWS = 5;   // Extra rows above/below viewport
 
-    let allLines = [];       // All lines from server (raw ANSI)
+    // allLines is now stored per-pane in PaneState
+    // Helper to get current pane's lines
+    function getAllLines() {
+      if (!activePaneId) return [];
+      const state = paneStates.get(activePaneId);
+      return state ? state.allLines : [];
+    }
+
     let renderedRange = { start: 0, end: 0 };
     let followMode = true;   // Auto-scroll to bottom
     let scrollRAF = null;    // RequestAnimationFrame for scroll handling
@@ -827,12 +920,17 @@
     let allCommands = [];
     let paletteOpen = false;
 
-    // Fetch commands from server
-    async function fetchCommands() {
+    // Fetch commands from server (optionally for a specific cwd)
+    async function fetchCommands(cwd) {
       try {
-        const res = await fetch('/api/commands');
+        const url = cwd ? `/api/commands?cwd=${encodeURIComponent(cwd)}` : '/api/commands';
+        const res = await fetch(url);
         const data = await res.json();
         allCommands = data.commands || [];
+        // Also store in current pane state
+        if (activePaneId && paneStates.has(activePaneId)) {
+          paneStates.get(activePaneId).commands = allCommands;
+        }
       } catch (error) {
         console.error('Failed to fetch commands:', error);
         allCommands = [];
@@ -936,14 +1034,19 @@
     // ============================================
     // VIRTUAL SCROLLING FUNCTIONS
     // ============================================
-    const PADDING_TOP = 60; // Space for fixed header
+    // PADDING_TOP is dynamic based on whether tabs are visible
+    function getPaddingTop() {
+      return output.classList.contains('with-tabs') ? 104 : 60;
+    }
 
     function getVisibleRange() {
       const scrollTop = output.scrollTop;
       const viewportHeight = output.clientHeight;
+      const paddingTop = getPaddingTop();
+      const lines = getAllLines();
 
-      const startRow = Math.max(0, Math.floor((scrollTop - PADDING_TOP) / ROW_HEIGHT) - BUFFER_ROWS);
-      const endRow = Math.min(allLines.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+      const startRow = Math.max(0, Math.floor((scrollTop - paddingTop) / ROW_HEIGHT) - BUFFER_ROWS);
+      const endRow = Math.min(lines.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + BUFFER_ROWS);
 
       return { start: startRow, end: endRow };
     }
@@ -952,6 +1055,7 @@
 
     function renderVisibleLines(forceRender = false) {
       const range = getVisibleRange();
+      const lines = getAllLines();
 
       // Skip if range hasn't changed AND we're not forcing a render
       if (!forceRender &&
@@ -963,20 +1067,22 @@
       renderedRange = range;
 
       // Build HTML for visible lines only (convert ANSI to HTML client-side)
-      const visibleLines = allLines.slice(range.start, range.end);
+      const visibleLines = lines.slice(range.start, range.end);
       const html = visibleLines.map(line =>
         `<div class="terminal-line">${ansiToHtml(line)}</div>`
       ).join('');
 
       // Position the content
-      virtualContent.style.top = (PADDING_TOP + range.start * ROW_HEIGHT) + 'px';
+      const paddingTop = getPaddingTop();
+      virtualContent.style.top = (paddingTop + range.start * ROW_HEIGHT) + 'px';
       virtualContent.innerHTML = html;
     }
 
     function updateVirtualHeight() {
       // Don't add PADDING_TOP here - the CSS padding-top on the container already creates that space
       // Adding it here creates a 60px gap at the bottom of the content
-      const totalHeight = allLines.length * ROW_HEIGHT;
+      const lines = getAllLines();
+      const totalHeight = lines.length * ROW_HEIGHT;
       virtualSpacer.style.height = totalHeight + 'px';
     }
 
@@ -1016,16 +1122,26 @@
       return lines.slice(start, end);
     }
 
-    function applyLinesUpdate(lines, mode) {
-      allLines = trimEmptyLines(lines);
-      updateVirtualHeight();
-      renderVisibleLines(true); // Force re-render since content changed
-      scrollToBottom();
+    function applyLinesUpdate(lines, mode, paneId) {
+      const trimmedLines = trimEmptyLines(lines);
+
+      // Store lines in the appropriate pane state
+      const targetPaneId = paneId || activePaneId;
+      if (targetPaneId && paneStates.has(targetPaneId)) {
+        paneStates.get(targetPaneId).allLines = trimmedLines;
+      }
+
+      // Only update display if this is for the active pane
+      if (targetPaneId === activePaneId) {
+        updateVirtualHeight();
+        renderVisibleLines(true); // Force re-render since content changed
+        scrollToBottom();
+      }
     }
 
-    function scheduleOutputUpdate(lines, mode) {
+    function scheduleOutputUpdate(lines, mode, paneId) {
       // Apply immediately - virtual scrolling is efficient
-      applyLinesUpdate(lines, mode);
+      applyLinesUpdate(lines, mode, paneId);
     }
 
     // ============================================
@@ -1077,7 +1193,7 @@
       ws.onopen = () => {
         connected = true;
         updateStatus();
-        setTimeout(sendResize, 100);
+        sendResize();
       };
 
       ws.onclose = () => {
@@ -1098,9 +1214,14 @@
 
     function handleMessage(msg) {
       switch (msg.type) {
+        case 'paneList':
+          // Server sent list of available panes
+          handlePaneList(msg.panes);
+          break;
+
         case 'output':
           if (msg.lines) {
-            scheduleOutputUpdate(msg.lines, msg.mode);
+            scheduleOutputUpdate(msg.lines, msg.mode, msg.paneId);
           }
           break;
 
@@ -1109,6 +1230,175 @@
             console.error('Failed to send message');
           }
           break;
+      }
+    }
+
+    // Handle pane list from server
+    function handlePaneList(panes) {
+      allPanes = panes || [];
+
+      // Create state for any new panes
+      for (const pane of allPanes) {
+        if (!paneStates.has(pane.id)) {
+          paneStates.set(pane.id, new PaneState(pane.id, pane.cwd));
+        } else {
+          // Update cwd in case it changed
+          paneStates.get(pane.id).cwd = pane.cwd;
+        }
+      }
+
+      // Remove state for panes that no longer exist
+      const currentPaneIds = new Set(allPanes.map(p => p.id));
+      for (const paneId of paneStates.keys()) {
+        if (!currentPaneIds.has(paneId)) {
+          paneStates.delete(paneId);
+        }
+      }
+
+      // Set initial active pane if not set
+      if (!activePaneId && allPanes.length > 0) {
+        // Try to restore from localStorage
+        const savedPaneId = localStorage.getItem(STORAGE_KEYS.activePane);
+        const savedPane = savedPaneId && allPanes.find(p => p.id === savedPaneId);
+        if (savedPane) {
+          activePaneId = savedPane.id;
+          activePaneTarget = savedPane.target;
+        } else {
+          activePaneId = allPanes[0].id;
+          activePaneTarget = allPanes[0].target;
+        }
+        // Restore per-pane state from localStorage
+        restorePaneState(activePaneId);
+      }
+
+      // Handle pane closure - switch to first available
+      if (activePaneId && !currentPaneIds.has(activePaneId) && allPanes.length > 0) {
+        switchPane(allPanes[0].id);
+      }
+
+      renderPaneTabs();
+    }
+
+    // Render pane tabs
+    function renderPaneTabs() {
+      // Hide tabs if only one pane
+      if (allPanes.length <= 1) {
+        paneTabs.classList.add('hidden');
+        output.classList.remove('with-tabs');
+        return;
+      }
+
+      paneTabs.classList.remove('hidden');
+      output.classList.add('with-tabs');
+
+      paneTabs.innerHTML = allPanes.map(pane => {
+        // Get just the directory name from the full path
+        const dirName = pane.cwd.split('/').pop() || pane.cwd;
+        const isActive = pane.id === activePaneId;
+        return `
+          <div class="pane-tab ${isActive ? 'active' : ''}" data-pane-id="${pane.id}" data-pane-target="${pane.target}">
+            <span class="pane-tab-name">${dirName}</span>
+          </div>
+        `;
+      }).join('');
+
+      // Add click handlers
+      paneTabs.querySelectorAll('.pane-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          const paneId = tab.dataset.paneId;
+          if (paneId !== activePaneId) {
+            switchPane(paneId);
+          }
+        });
+      });
+    }
+
+    // Switch to a different pane
+    function switchPane(paneId) {
+      const pane = allPanes.find(p => p.id === paneId);
+      if (!pane) return;
+
+      // Save current pane state
+      if (activePaneId) {
+        savePaneState(activePaneId);
+      }
+
+      // Set new active pane
+      activePaneId = pane.id;
+      activePaneTarget = pane.target;
+      localStorage.setItem(STORAGE_KEYS.activePane, paneId);
+
+      // Restore state for new pane
+      restorePaneState(paneId);
+
+      // Update tab UI
+      renderPaneTabs();
+
+      // Request output for this pane via WebSocket
+      if (ws && connected) {
+        ws.send(JSON.stringify({ type: 'switchPane', paneId }));
+      }
+
+      // Fetch commands for this pane's cwd
+      fetchCommands(pane.cwd);
+
+      // Re-render with the new pane's lines
+      updateVirtualHeight();
+      renderVisibleLines(true);
+      scrollToBottom();
+    }
+
+    // Save current pane state
+    function savePaneState(paneId) {
+      const state = paneStates.get(paneId);
+      if (!state) return;
+
+      state.inputText = messageInput.value;
+      state.selectedLanguage = selectedLanguage;
+      state.scrollPosition = output.scrollTop;
+
+      // Save to localStorage
+      localStorage.setItem(STORAGE_KEYS.inputText(paneId), state.inputText);
+      if (state.selectedLanguage && state.selectedLanguage.code) {
+        localStorage.setItem(STORAGE_KEYS.language(paneId), state.selectedLanguage.code);
+      }
+    }
+
+    // Restore pane state
+    function restorePaneState(paneId) {
+      const state = paneStates.get(paneId);
+      if (!state) return;
+
+      // Restore from localStorage if available
+      const savedInput = localStorage.getItem(STORAGE_KEYS.inputText(paneId));
+      const savedLang = localStorage.getItem(STORAGE_KEYS.language(paneId));
+
+      if (savedInput !== null) {
+        state.inputText = savedInput;
+      }
+      if (savedLang) {
+        const lang = languages.find(l => l.code === savedLang);
+        if (lang) state.selectedLanguage = lang;
+      }
+
+      // Default to first language if not set
+      if (!state.selectedLanguage) {
+        state.selectedLanguage = languages[0];
+      }
+
+      // Update UI
+      messageInput.value = state.inputText;
+      selectedLanguage = state.selectedLanguage;
+      messageInput.style.height = 'auto';
+      messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+      updateButtonState();
+
+      // Restore commands if cached, or fetch fresh
+      if (state.commands.length > 0) {
+        allCommands = state.commands;
+      } else {
+        // Fetch commands for this pane's cwd
+        fetchCommands(state.cwd);
       }
     }
 
@@ -1413,34 +1703,26 @@
     });
 
     // ============================================
-    // VISIBILITY CHANGE - Reconnect when returning to app
+    // CONNECTION RECOVERY - Simple: just re-fetch via REST immediately
     // ============================================
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        // Immediately show connected status - don't flash "Reconnecting"
-        // WebSocket will update status if it actually fails
-        connected = true;
-        updateStatus();
-
-        // iOS kills WebSocket connections in background but readyState may lie
-        // Always fetch content via REST immediately and force reconnect
-        fetch('/api/output')
-          .then(res => res.json())
-          .then(data => {
-            if (data.output) {
-              applyLinesUpdate(data.output.split('\n'), null);
-            }
-          })
-          .catch(() => {});
-
-        // Force close and reconnect - don't trust existing connection state
-        if (ws) {
-          ws.onclose = null; // Prevent auto-reconnect from old socket
-          ws.close();
-        }
-        connect();
+    function recover() {
+      // Kill stale WebSocket
+      if (ws) {
+        ws.onclose = null;
+        try { ws.close(); } catch(e) {}
       }
+      // Re-initialize everything
+      initializeFromREST();
+      connect();
+    }
+
+    // Any of these events = recover immediately
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') recover();
     });
+    window.addEventListener('pageshow', () => recover());
+    window.addEventListener('focus', () => recover());
+    window.addEventListener('online', () => recover());
 
     // ============================================
     // iOS SCROLL FIXES
@@ -1538,50 +1820,53 @@
     // LOCAL STORAGE PERSISTENCE
     // ============================================
     const STORAGE_KEYS = {
-      inputText: 'claude-relay-input',
-      language: 'claude-relay-language'
+      // Per-pane keys
+      inputText: (paneId) => `claude-relay-input-${paneId}`,
+      language: (paneId) => `claude-relay-language-${paneId}`,
+      // Global keys
+      activePane: 'claude-relay-active-pane'
     };
 
-    // Restore input text from localStorage
-    const savedInput = localStorage.getItem(STORAGE_KEYS.inputText);
-    if (savedInput) {
-      messageInput.value = savedInput;
-      messageInput.style.height = 'auto';
-      messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
-    }
+    // Note: Input text and language are now restored per-pane in restorePaneState()
+    // The initial restore happens after paneList is received from server
 
-    // Restore selected language from localStorage
-    const savedLang = localStorage.getItem(STORAGE_KEYS.language);
-    if (savedLang) {
-      const lang = languages.find(l => l.code === savedLang);
-      if (lang) selectedLanguage = lang;
-    }
-
-    // Save input text on change (debounced)
+    // Save input text on change (debounced) - now per-pane
     let inputSaveTimer = null;
     messageInput.addEventListener('input', () => {
       clearTimeout(inputSaveTimer);
       inputSaveTimer = setTimeout(() => {
+        if (!activePaneId) return;
         const text = messageInput.value;
         if (text) {
-          localStorage.setItem(STORAGE_KEYS.inputText, text);
+          localStorage.setItem(STORAGE_KEYS.inputText(activePaneId), text);
         } else {
-          localStorage.removeItem(STORAGE_KEYS.inputText);
+          localStorage.removeItem(STORAGE_KEYS.inputText(activePaneId));
         }
+        // Also update pane state
+        const state = paneStates.get(activePaneId);
+        if (state) state.inputText = text;
       }, 300);
     });
 
     // Clear saved input when message is sent
     const originalSendMessage = sendMessage;
     sendMessage = function() {
-      localStorage.removeItem(STORAGE_KEYS.inputText);
+      if (activePaneId) {
+        localStorage.removeItem(STORAGE_KEYS.inputText(activePaneId));
+        const state = paneStates.get(activePaneId);
+        if (state) state.inputText = '';
+      }
       originalSendMessage();
     };
 
-    // Save language when changed
+    // Save language when changed - now per-pane
     const originalSelectLanguage = selectLanguage;
     selectLanguage = function(lang) {
-      localStorage.setItem(STORAGE_KEYS.language, lang.code);
+      if (activePaneId) {
+        localStorage.setItem(STORAGE_KEYS.language(activePaneId), lang.code);
+        const state = paneStates.get(activePaneId);
+        if (state) state.selectedLanguage = lang;
+      }
       originalSelectLanguage(lang);
     };
 
@@ -1591,19 +1876,33 @@
     // Initialize button state (show mic if no text)
     updateButtonState();
 
-    // Fetch commands for palette on load
-    fetchCommands();
+    // Immediately fetch everything via REST - don't wait for WebSocket
+    async function initializeFromREST() {
+      try {
+        // Fetch pane list
+        const panesRes = await fetch('/api/panes');
+        const panesData = await panesRes.json();
+        handlePaneList(panesData.panes);
 
-    // Fetch initial content immediately via REST while WebSocket connects
-    fetch('/api/output')
-      .then(res => res.json())
-      .then(data => {
-        if (data.output && allLines.length === 0) {
-          applyLinesUpdate(data.output.split('\n'), null);
+        // Fetch output for active pane
+        if (activePaneTarget) {
+          const outputRes = await fetch(`/api/output?target=${encodeURIComponent(activePaneTarget)}`);
+          const outputData = await outputRes.json();
+          if (outputData.output) {
+            applyLinesUpdate(outputData.output.split('\n'), null, activePaneId);
+          }
         }
-      })
-      .catch(() => {}); // Ignore errors, WebSocket will handle it
 
+        // Mark as connected once REST succeeds
+        connected = true;
+        updateStatus();
+      } catch (e) {
+        console.error('REST init failed:', e);
+      }
+    }
+
+    // Initialize immediately via REST, then connect WebSocket for live updates
+    initializeFromREST();
     connect();
   </script>
 </body>

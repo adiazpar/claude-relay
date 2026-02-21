@@ -70,14 +70,22 @@ app.get('/cert', (req, res) => {
 
 // Get current pane content
 app.get('/api/output', (req, res) => {
-  const output = tmuxBridge.getFullOutput()
+  const target = req.query.target as string | undefined
+  const output = tmuxBridge.getFullOutput(target)
   res.json({ output })
+})
+
+// Get all available panes
+app.get('/api/panes', (req, res) => {
+  const panes = tmuxBridge.listPanes()
+  res.json({ panes })
 })
 
 // Get available slash commands
 app.get('/api/commands', async (req, res) => {
   try {
-    const commands = await getAllCommands()
+    const cwd = req.query.cwd as string | undefined
+    const commands = await getAllCommands(cwd)
     res.json({ commands })
   } catch (error) {
     console.error('Error fetching commands:', error)
@@ -96,60 +104,112 @@ app.post('/api/send', (req, res) => {
   res.json({ success })
 })
 
+// Track active pane per client
+interface ClientState {
+  activePane: string | null
+  activePaneTarget: string | null
+}
+const clientStates = new WeakMap<WebSocket, ClientState>()
+
 // WebSocket handling for real-time communication
 wss.on('connection', (ws: WebSocket) => {
   console.log('Client connected')
+
+  // Initialize client state
+  const panes = tmuxBridge.listPanes()
+  const initialPane = panes[0] || null
+  clientStates.set(ws, {
+    activePane: initialPane?.id || null,
+    activePaneTarget: initialPane?.target || null
+  })
+
+  // Send pane list
+  ws.send(JSON.stringify({
+    type: 'paneList',
+    panes
+  }))
 
   // Send initial status
   ws.send(JSON.stringify({
     type: 'status',
     tmuxSession: tmuxBridge.sessionExists(),
-    claudeRunning: tmuxBridge.isClaudeRunning()
+    claudeRunning: tmuxBridge.isClaudeRunning(initialPane?.target)
   }))
 
-  // Send current output as lines (for virtual scrolling) and mode
-  ws.send(JSON.stringify({
-    type: 'output',
-    lines: toLines(tmuxBridge.getFullOutput()),
-    mode: tmuxBridge.detectMode()
-  }))
+  // Send current output for first pane
+  if (initialPane) {
+    ws.send(JSON.stringify({
+      type: 'output',
+      paneId: initialPane.id,
+      lines: toLines(tmuxBridge.getFullOutput(initialPane.target)),
+      mode: tmuxBridge.detectMode(initialPane.target)
+    }))
+  }
 
   // Handle incoming messages
   ws.on('message', (data: Buffer) => {
     try {
       const msg = JSON.parse(data.toString())
+      const clientState = clientStates.get(ws)
+      const paneTarget = msg.paneTarget || clientState?.activePaneTarget
 
-      if (msg.type === 'send') {
-        const success = tmuxBridge.sendMessage(msg.content)
+      if (msg.type === 'switchPane') {
+        // Client is switching to a different pane
+        const panes = tmuxBridge.listPanes()
+        const pane = panes.find(p => p.id === msg.paneId)
+        if (pane && clientState) {
+          clientState.activePane = pane.id
+          clientState.activePaneTarget = pane.target
+          // Send output for the new pane
+          ws.send(JSON.stringify({
+            type: 'output',
+            paneId: pane.id,
+            lines: toLines(tmuxBridge.getFullOutput(pane.target)),
+            mode: tmuxBridge.detectMode(pane.target)
+          }))
+        }
+      } else if (msg.type === 'send') {
+        const success = tmuxBridge.sendMessage(msg.content, paneTarget)
         ws.send(JSON.stringify({
           type: 'sent',
           success,
-          content: msg.content
+          content: msg.content,
+          paneId: clientState?.activePane
         }))
       } else if (msg.type === 'key') {
-        const success = tmuxBridge.sendKey(msg.key)
+        const success = tmuxBridge.sendKey(msg.key, paneTarget)
         ws.send(JSON.stringify({
           type: 'keySent',
           success,
-          key: msg.key
+          key: msg.key,
+          paneId: clientState?.activePane
         }))
       } else if (msg.type === 'refresh') {
+        // Refresh pane list
+        const panes = tmuxBridge.listPanes()
+        ws.send(JSON.stringify({
+          type: 'paneList',
+          panes
+        }))
+        // Send output for active pane
         ws.send(JSON.stringify({
           type: 'output',
-          lines: toLines(tmuxBridge.getFullOutput()),
-          mode: tmuxBridge.detectMode()
+          paneId: clientState?.activePane,
+          lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
+          mode: tmuxBridge.detectMode(paneTarget)
         }))
       } else if (msg.type === 'resize') {
         const cols = parseInt(msg.cols, 10)
         if (cols && cols > 0) {
-          const success = tmuxBridge.resizePane(cols)
+          const success = tmuxBridge.resizePane(cols, undefined, paneTarget)
           if (success) {
             // After resize, send updated output
             setTimeout(() => {
               ws.send(JSON.stringify({
                 type: 'output',
-                lines: toLines(tmuxBridge.getFullOutput()),
-                mode: tmuxBridge.detectMode()
+                paneId: clientState?.activePane,
+                lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
+                mode: tmuxBridge.detectMode(paneTarget)
               }))
             }, 100)
           }
@@ -165,20 +225,26 @@ wss.on('connection', (ws: WebSocket) => {
 
   ws.on('close', () => {
     console.log('Client disconnected')
+    clientStates.delete(ws)
   })
 })
 
-// Forward tmux output changes to all connected clients
-tmuxBridge.on('output', (rawContent: string) => {
+// Forward tmux output changes to clients watching that pane
+tmuxBridge.on('output', (rawContent: string, paneId: string, paneTarget: string) => {
   const message = JSON.stringify({
-    type: 'output',  // Lines for virtual scrolling
+    type: 'output',
+    paneId,
     lines: toLines(rawContent),
-    mode: tmuxBridge.detectMode()
+    mode: tmuxBridge.detectMode(paneTarget)
   })
 
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(message)
+      const clientState = clientStates.get(client)
+      // Send to clients watching this pane
+      if (clientState?.activePane === paneId) {
+        client.send(message)
+      }
     }
   })
 })

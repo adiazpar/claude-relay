@@ -205,16 +205,17 @@ async function scanPluginSkills(pluginsDir: string): Promise<Command[]> {
 
 /**
  * Get all available commands from all sources
+ * @param projectCwd Optional project directory to scan for project-specific commands
  */
-export async function getAllCommands(): Promise<Command[]> {
+export async function getAllCommands(projectCwd?: string): Promise<Command[]> {
   const homeDir = os.homedir()
-  const cwd = process.cwd()
+  const projectDir = projectCwd || process.cwd()
 
   // Paths to scan
   const userSkillsDir = path.join(homeDir, '.claude', 'skills')
-  const projectSkillsDir = path.join(cwd, '.claude', 'skills')
+  const projectSkillsDir = path.join(projectDir, '.claude', 'skills')
   const pluginsDir = path.join(homeDir, '.claude', 'plugins')
-  const legacyCommandsDir = path.join(cwd, '.claude', 'commands')
+  const legacyCommandsDir = path.join(projectDir, '.claude', 'commands')
 
   // Scan all directories in parallel
   const [userSkills, projectSkills, pluginSkills, legacyCommands] = await Promise.all([
