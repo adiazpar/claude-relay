@@ -89,6 +89,46 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
+  // Create a new window in the session
+  createWindow(cwd?: string): PaneInfo | null {
+    if (!this.sessionExists()) {
+      console.error(`Tmux session '${TMUX_SESSION}' not found`)
+      return null
+    }
+
+    try {
+      // Create new window, optionally in a specific directory
+      if (cwd) {
+        execSync(`tmux new-window -t ${TMUX_SESSION} -c '${cwd.replace(/'/g, "'\\''")}'`)
+      } else {
+        execSync(`tmux new-window -t ${TMUX_SESSION}`)
+      }
+
+      // Get the updated pane list and return the new window (last one)
+      const panes = this.listPanes()
+      return panes[panes.length - 1] || null
+    } catch (error) {
+      console.error('Failed to create window:', error)
+      return null
+    }
+  }
+
+  // Close a window by target
+  closeWindow(target: string): boolean {
+    if (!this.sessionExists()) {
+      console.error(`Tmux session '${TMUX_SESSION}' not found`)
+      return false
+    }
+
+    try {
+      execSync(`tmux kill-window -t ${target}`)
+      return true
+    } catch (error) {
+      console.error('Failed to close window:', error)
+      return false
+    }
+  }
+
   // Send a message to Claude Code in tmux
   sendMessage(message: string, target?: string): boolean {
     if (!this.sessionExists()) {
@@ -295,6 +335,21 @@ export class TmuxBridge extends EventEmitter {
       return true
     } catch (error) {
       console.error('Failed to resize window:', error)
+      return false
+    }
+  }
+
+  // Select/activate a window in tmux (makes it visible in terminal)
+  selectWindow(target: string): boolean {
+    if (!this.sessionExists()) {
+      return false
+    }
+
+    try {
+      execSync(`tmux select-window -t ${target}`)
+      return true
+    } catch (error) {
+      console.error('Failed to select window:', error)
       return false
     }
   }

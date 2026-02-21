@@ -72,18 +72,21 @@
     }
 
     .pane-tab {
-      padding: 6px 12px;
-      border-radius: 6px;
-      background: var(--bg-secondary);
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 14px;
+      background: var(--bg-tertiary);
       border: 1px solid var(--border);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
       font-size: 12px;
       white-space: nowrap;
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: all 0.2s ease;
       display: flex;
       align-items: center;
       gap: 6px;
       flex-shrink: 0;
+      color: var(--text-secondary);
     }
 
     .pane-tab:active {
@@ -96,10 +99,97 @@
       color: white;
     }
 
+    @media (hover: hover) {
+      .pane-tab:hover:not(.active):not(.swiped) {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+        background: rgba(215, 118, 85, 0.1);
+      }
+    }
+
     .pane-tab-name {
       max-width: 120px;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    /* Swipe-to-close tab - inline content transformation */
+    .pane-tab {
+      overflow: hidden;
+      position: relative;
+    }
+
+    .pane-tab-content {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+
+    .pane-tab-close-icon {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(calc(-50% + 100px), -50%);
+      width: 14px;
+      height: 14px;
+      transition: transform 0.2s ease;
+      pointer-events: none;
+      opacity: 0;
+    }
+
+    .pane-tab-close-icon svg {
+      width: 100%;
+      height: 100%;
+      stroke: white;
+      stroke-width: 2.5;
+    }
+
+    .pane-tab.swiped {
+      background: #e53935 !important;
+      border-color: #e53935 !important;
+      color: white;
+    }
+
+    .pane-tab.swiped .pane-tab-content {
+      transform: translateX(-150%);
+      opacity: 0;
+    }
+
+    .pane-tab.swiped .pane-tab-close-icon {
+      transform: translate(-50%, -50%);
+      opacity: 1;
+    }
+
+    /* Add window button - matches shortcut-btn style */
+    .pane-tab-add {
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 14px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.2s ease;
+    }
+
+    .pane-tab-add:active {
+      transform: scale(0.97);
+    }
+
+    @media (hover: hover) {
+      .pane-tab-add:hover {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+        background: rgba(215, 118, 85, 0.1);
+      }
     }
 
     .header-left {
@@ -1281,36 +1371,210 @@
 
     // Render pane tabs
     function renderPaneTabs() {
-      // Hide tabs if only one pane
-      if (allPanes.length <= 1) {
-        paneTabs.classList.add('hidden');
-        output.classList.remove('with-tabs');
-        return;
-      }
-
+      // Always show tabs (even with one pane, to allow adding more)
       paneTabs.classList.remove('hidden');
       output.classList.add('with-tabs');
 
-      paneTabs.innerHTML = allPanes.map(pane => {
+      const tabsHtml = allPanes.map(pane => {
         // Get just the directory name from the full path
         const dirName = pane.cwd.split('/').pop() || pane.cwd;
         const isActive = pane.id === activePaneId;
         return `
           <div class="pane-tab ${isActive ? 'active' : ''}" data-pane-id="${pane.id}" data-pane-target="${pane.target}">
-            <span class="pane-tab-name">${dirName}</span>
+            <div class="pane-tab-content">
+              <span class="pane-tab-name">${dirName}</span>
+            </div>
+            <div class="pane-tab-close-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6L6 18"/><path d="M6 6l12 12"/>
+              </svg>
+            </div>
           </div>
         `;
       }).join('');
 
-      // Add click handlers
+      // Add the + button at the end
+      paneTabs.innerHTML = tabsHtml + `
+        <button class="pane-tab-add" title="New window">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14"/><path d="M5 12h14"/>
+          </svg>
+          <span>New</span>
+        </button>
+      `;
+
+      // Add click handlers for tabs
       paneTabs.querySelectorAll('.pane-tab').forEach(tab => {
+        if (tab.classList.contains('pane-tab-add')) return;
+
+        const paneId = tab.dataset.paneId;
+        const paneTarget = tab.dataset.paneTarget;
+
+        // Tab click - switch pane or close if swiped
         tab.addEventListener('click', () => {
-          const paneId = tab.dataset.paneId;
-          if (paneId !== activePaneId) {
+          if (tab.classList.contains('swiped')) {
+            closeWindow(paneTarget);
+          } else if (paneId !== activePaneId) {
             switchPane(paneId);
           }
         });
+
+        // Swipe gesture handling
+        setupSwipeGesture(tab, paneTarget);
       });
+
+      // Add click handler for + button
+      paneTabs.querySelector('.pane-tab-add').addEventListener('click', createNewWindow);
+    }
+
+    // Setup swipe gesture for a tab
+    function setupSwipeGesture(tab, paneTarget) {
+      let startX = 0;
+      let currentX = 0;
+      let isDragging = false;
+      let wasSwipedOnStart = false;
+      const content = tab.querySelector('.pane-tab-content');
+      const closeIcon = tab.querySelector('.pane-tab-close-icon');
+      const tabWidth = 80; // Approximate width for full swipe
+
+      tab.addEventListener('touchstart', (e) => {
+        startX = e.touches[0].clientX;
+        currentX = startX;
+        isDragging = true;
+        wasSwipedOnStart = tab.classList.contains('swiped');
+        // Close other swiped tabs
+        paneTabs.querySelectorAll('.pane-tab.swiped').forEach(t => {
+          if (t !== tab) t.classList.remove('swiped');
+        });
+      }, { passive: true });
+
+      tab.addEventListener('touchmove', (e) => {
+        if (!isDragging) return;
+        currentX = e.touches[0].clientX;
+        const diff = startX - currentX;
+
+        // Only handle left swipes
+        if (diff > 5) {
+          const progress = Math.min(1, Math.max(0, diff / tabWidth));
+
+          // Slide content out to the left and fade out
+          content.style.transform = `translateX(-${progress * 150}%)`;
+          content.style.opacity = 1 - progress;
+          content.style.transition = 'none';
+
+          // Slide X icon in from the right to center
+          // Start offset: 100px to the right, end: centered (-50%, -50%)
+          const iconOffset = 100 * (1 - progress);
+          closeIcon.style.transform = `translate(calc(-50% + ${iconOffset}px), -50%)`;
+          closeIcon.style.opacity = progress;
+          closeIcon.style.transition = 'none';
+
+          // Interpolate background color from current to red
+          const isActive = tab.classList.contains('active');
+          // Start color: accent for active, bg-tertiary approximation for inactive
+          const startR = isActive ? 215 : 45;
+          const startG = isActive ? 118 : 42;
+          const startB = isActive ? 85 : 38;
+          const r = Math.round(startR + (229 - startR) * progress);
+          const g = Math.round(startG + (57 - startG) * progress);
+          const b = Math.round(startB + (53 - startB) * progress);
+          tab.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+          tab.style.borderColor = `rgb(${r}, ${g}, ${b})`;
+        }
+      }, { passive: true });
+
+      tab.addEventListener('touchend', () => {
+        isDragging = false;
+        const diff = startX - currentX;
+        const progress = diff / tabWidth;
+
+        // Reset inline styles
+        content.style.transform = '';
+        content.style.opacity = '';
+        content.style.transition = '';
+        closeIcon.style.transform = '';
+        closeIcon.style.opacity = '';
+        closeIcon.style.transition = '';
+        tab.style.backgroundColor = '';
+        tab.style.borderColor = '';
+
+        const wasSwipe = Math.abs(diff) > 10;
+
+        // If tab was already swiped and this was just a tap (not a swipe), close the window
+        if (wasSwipedOnStart && !wasSwipe) {
+          closeWindow(paneTarget);
+          return;
+        }
+
+        // Only modify swiped state if there was actual swipe movement
+        if (wasSwipe) {
+          if (progress > 0.4) {
+            tab.classList.add('swiped');
+          } else if (diff < -20 || progress < 0.2) {
+            tab.classList.remove('swiped');
+          }
+        }
+      });
+
+      // Click anywhere else to close swiped tab
+      document.addEventListener('click', (e) => {
+        if (!tab.contains(e.target) && tab.classList.contains('swiped')) {
+          tab.classList.remove('swiped');
+        }
+      });
+    }
+
+    // Close a window
+    async function closeWindow(target) {
+      // Don't allow closing the last window
+      if (allPanes.length <= 1) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/panes/close', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          // Handle pane list update (will switch pane if needed)
+          handlePaneList(data.panes);
+        } else {
+          console.error('Failed to close window:', data.error);
+        }
+      } catch (error) {
+        console.error('Error closing window:', error);
+      }
+    }
+
+    // Create a new window
+    async function createNewWindow() {
+      try {
+        // Get current pane's cwd to use as default for new window
+        const currentState = paneStates.get(activePaneId);
+        const cwd = currentState?.cwd || undefined;
+
+        const res = await fetch('/api/panes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cwd })
+        });
+        const data = await res.json();
+
+        if (data.success && data.pane) {
+          // Update pane list
+          handlePaneList(data.panes);
+          // Switch to the new pane
+          switchPane(data.pane.id);
+        } else {
+          console.error('Failed to create window:', data.error);
+        }
+      } catch (error) {
+        console.error('Error creating window:', error);
+      }
     }
 
     // Switch to a different pane
@@ -1706,9 +1970,15 @@
     });
 
     // ============================================
-    // CONNECTION RECOVERY - Simple: just re-fetch via REST immediately
+    // CONNECTION RECOVERY - Only recover if connection is actually broken
     // ============================================
     function recover() {
+      // Only recover if WebSocket is closed or in error state
+      // Don't interrupt an active or connecting WebSocket
+      if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+        return;
+      }
+
       // Kill stale WebSocket
       if (ws) {
         ws.onclose = null;
@@ -1719,7 +1989,7 @@
       connect();
     }
 
-    // Any of these events = recover immediately
+    // These events trigger recovery only if connection is broken
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') recover();
     });

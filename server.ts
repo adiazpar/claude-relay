@@ -81,6 +81,31 @@ app.get('/api/panes', (req, res) => {
   res.json({ panes })
 })
 
+// Create a new window
+app.post('/api/panes', (req, res) => {
+  const { cwd } = req.body
+  const newPane = tmuxBridge.createWindow(cwd)
+  if (newPane) {
+    res.json({ success: true, pane: newPane, panes: tmuxBridge.listPanes() })
+  } else {
+    res.status(500).json({ success: false, error: 'Failed to create window' })
+  }
+})
+
+// Close a window
+app.post('/api/panes/close', (req, res) => {
+  const { target } = req.body
+  if (!target) {
+    return res.status(400).json({ success: false, error: 'Target required' })
+  }
+  const success = tmuxBridge.closeWindow(target)
+  if (success) {
+    res.json({ success: true, panes: tmuxBridge.listPanes() })
+  } else {
+    res.status(500).json({ success: false, error: 'Failed to close window' })
+  }
+})
+
 // Get available slash commands
 app.get('/api/commands', async (req, res) => {
   try {
@@ -160,6 +185,8 @@ wss.on('connection', (ws: WebSocket) => {
         if (pane && clientState) {
           clientState.activePane = pane.id
           clientState.activePaneTarget = pane.target
+          // Select the window in tmux (makes it visible in terminal)
+          tmuxBridge.selectWindow(pane.target)
           // Send output for the new pane
           ws.send(JSON.stringify({
             type: 'output',
