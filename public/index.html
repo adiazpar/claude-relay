@@ -97,6 +97,17 @@
       transform: scale(0.97);
     }
 
+    /* Long press feedback animation */
+    @keyframes longPressPulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(0.92); }
+      100% { transform: scale(1); }
+    }
+
+    .pane-tab.long-press-feedback {
+      animation: longPressPulse 0.2s ease-out;
+    }
+
     .pane-tab.active {
       background: var(--accent);
       border-color: var(--accent);
@@ -1546,6 +1557,10 @@
           isLongPress = false;
           longPressTimer = setTimeout(() => {
             isLongPress = true;
+            // Trigger haptic feedback and animation
+            triggerHaptic();
+            tab.classList.add('long-press-feedback');
+            setTimeout(() => tab.classList.remove('long-press-feedback'), 200);
             openTabActionSheet(paneId, paneTarget, dirName);
           }, 500);
         };
@@ -1586,6 +1601,45 @@
         createNewWindow();
       });
     }
+
+    // ============================================
+    // HAPTIC FEEDBACK
+    // ============================================
+    // Hidden checkbox for iOS 18+ haptic feedback workaround
+    let hapticCheckbox = null;
+    let hapticLabel = null;
+
+    function initHaptics() {
+      // Create hidden switch checkbox for iOS haptic workaround
+      hapticCheckbox = document.createElement('input');
+      hapticCheckbox.type = 'checkbox';
+      hapticCheckbox.setAttribute('switch', '');
+      hapticCheckbox.id = 'haptic-trigger';
+      hapticCheckbox.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0;pointer-events:none;';
+
+      hapticLabel = document.createElement('label');
+      hapticLabel.htmlFor = 'haptic-trigger';
+      hapticLabel.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0;pointer-events:none;';
+
+      document.body.appendChild(hapticCheckbox);
+      document.body.appendChild(hapticLabel);
+    }
+
+    function triggerHaptic() {
+      // Try Vibration API first (Android)
+      if (navigator.vibrate) {
+        navigator.vibrate(10);
+        return;
+      }
+
+      // iOS 18+ workaround: toggle hidden switch checkbox
+      if (hapticLabel) {
+        hapticLabel.click();
+      }
+    }
+
+    // Initialize haptics on load
+    initHaptics();
 
     // ============================================
     // TAB ACTION SHEET
@@ -2047,6 +2101,7 @@
       isLongPress = false;
       longPressTimer = setTimeout(() => {
         isLongPress = true;
+        triggerHaptic();
         openLanguageDrawer();
       }, LONG_PRESS_DURATION);
     }, { passive: true });
