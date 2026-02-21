@@ -1605,34 +1605,29 @@
     // ============================================
     // HAPTIC FEEDBACK
     // ============================================
-    let hapticDebugInfo = '';
-
     function triggerHaptic() {
       // Try Vibration API first (Android)
       if (navigator.vibrate) {
         navigator.vibrate(10);
-        hapticDebugInfo = 'Vibration API used';
         return;
       }
 
-      // iOS 18+ workaround: create switch checkbox, click it, remove it
+      // iOS 18+ workaround: create switch checkbox, toggle it, remove it
       // Based on https://github.com/tijnjh/ios-haptics
+      // Note: May not work on iOS 26.x due to system haptic bugs
       try {
         const label = document.createElement('label');
-        label.style.display = 'none';
-        label.ariaHidden = 'true';
-
         const input = document.createElement('input');
         input.type = 'checkbox';
         input.setAttribute('switch', '');
         label.appendChild(input);
-
-        document.head.appendChild(label);
-        label.click();
-        document.head.removeChild(label);
-        hapticDebugInfo = 'iOS checkbox workaround used';
+        label.style.cssText = 'position:fixed;left:-9999px;top:-9999px;pointer-events:none;';
+        document.body.appendChild(label);
+        input.checked = !input.checked;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        document.body.removeChild(label);
       } catch (e) {
-        hapticDebugInfo = 'Haptic error: ' + e.message;
+        // Silently fail - haptics are nice-to-have
       }
     }
 
@@ -1654,12 +1649,6 @@
       const customName = localStorage.getItem(STORAGE_KEYS.tabName(paneId));
       const displayName = customName || dirName;
       tabActionName.textContent = displayName;
-
-      // Show debug info
-      const debugEl = document.createElement('div');
-      debugEl.style.cssText = 'font-size:10px;color:#888;margin-top:4px;';
-      debugEl.textContent = hapticDebugInfo || 'No haptic triggered';
-      tabActionName.parentElement.appendChild(debugEl);
 
       // Build options
       const canClose = allPanes.length > 1;
