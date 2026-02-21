@@ -472,6 +472,88 @@
       font-size: 13px;
     }
 
+    /* Language drawer - similar to command palette */
+    .language-drawer {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
+      opacity: 0;
+      margin-bottom: 0;
+    }
+
+    .language-drawer.open {
+      grid-template-rows: 1fr;
+      opacity: 1;
+      margin-bottom: 10px;
+    }
+
+    .language-drawer-inner {
+      overflow: hidden;
+    }
+
+    .language-drawer-content {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px;
+    }
+
+    .language-drawer-title {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 4px 8px 4px;
+    }
+
+    .language-drawer-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      padding: 0 8px 10px;
+    }
+
+    .language-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .language-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-size: 13px;
+    }
+
+    .language-item:active {
+      transform: scale(0.97);
+    }
+
+    .language-item.selected {
+      border-color: var(--accent);
+      background: rgba(215, 118, 85, 0.15);
+    }
+
+    .language-flag {
+      font-size: 16px;
+    }
+
+    .language-name {
+      color: var(--text-primary);
+    }
+
+    .language-code {
+      color: var(--text-secondary);
+      font-size: 11px;
+    }
+
   </style>
 </head>
 <body>
@@ -528,6 +610,16 @@
       <div class="command-palette-inner">
         <div class="command-palette-content" id="commandPaletteContent">
           <div class="command-list" id="commandList"></div>
+        </div>
+      </div>
+    </div>
+    <!-- Language drawer -->
+    <div class="language-drawer" id="languageDrawer">
+      <div class="language-drawer-inner">
+        <div class="language-drawer-content">
+          <div class="language-drawer-title">Voice Language</div>
+          <div class="language-drawer-desc">Choose the language you'll speak into the microphone</div>
+          <div class="language-list" id="languageList"></div>
         </div>
       </div>
     </div>
@@ -1054,21 +1146,89 @@
     // Check if speech recognition is supported
     const speechSupported = !!SpeechRecognition;
 
-    // Debug: log speech support status (visible in status text briefly)
+    // Available languages
+    const languages = [
+      { code: 'en-US', name: 'English', flag: '🇺🇸' },
+      { code: 'es-ES', name: 'Spanish', flag: '🇪🇸' },
+      { code: 'fr-FR', name: 'French', flag: '🇫🇷' },
+      { code: 'de-DE', name: 'German', flag: '🇩🇪' },
+      { code: 'it-IT', name: 'Italian', flag: '🇮🇹' },
+      { code: 'pt-BR', name: 'Portuguese', flag: '🇧🇷' },
+      { code: 'zh-CN', name: 'Chinese', flag: '🇨🇳' },
+      { code: 'ja-JP', name: 'Japanese', flag: '🇯🇵' },
+      { code: 'ko-KR', name: 'Korean', flag: '🇰🇷' },
+    ];
+
+    // Language drawer state
+    const languageDrawer = document.getElementById('languageDrawer');
+    const languageList = document.getElementById('languageList');
+    let languageDrawerOpen = false;
+    let selectedLanguage = languages[0]; // Default to English
+
+    // Debug: log speech support status
     console.log('Speech API check:', {
       SpeechRecognition: !!window.SpeechRecognition,
       webkitSpeechRecognition: !!window.webkitSpeechRecognition,
       supported: speechSupported
     });
 
-    if (speechSupported) {
+    // Render language options
+    function renderLanguages() {
+      languageList.innerHTML = languages.map(lang => `
+        <div class="language-item ${lang.code === selectedLanguage.code ? 'selected' : ''}" data-code="${lang.code}">
+          <span class="language-flag">${lang.flag}</span>
+          <span class="language-name">${lang.name}</span>
+        </div>
+      `).join('');
+
+      // Add click handlers
+      languageList.querySelectorAll('.language-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const code = item.dataset.code;
+          const lang = languages.find(l => l.code === code);
+          if (lang) {
+            selectLanguage(lang);
+          }
+        });
+      });
+    }
+
+    // Open language drawer
+    function openLanguageDrawer() {
+      if (!speechSupported) {
+        const debugInfo = `SpeechRecognition: ${!!window.SpeechRecognition}, webkitSpeechRecognition: ${!!window.webkitSpeechRecognition}`;
+        alert(`Voice input not available.\n\nDebug: ${debugInfo}\n\nIf on iOS:\n- Make sure you're in Safari (not a home screen PWA)\n- Siri must be enabled in Settings`);
+        return;
+      }
+      languageDrawerOpen = true;
+      languageDrawer.classList.add('open');
+      closeCommandPalette(); // Close command palette if open
+      renderLanguages();
+      updateOutputPadding();
+    }
+
+    // Close language drawer
+    function closeLanguageDrawer() {
+      languageDrawerOpen = false;
+      languageDrawer.classList.remove('open');
+      setTimeout(() => updateOutputPadding(), 220);
+    }
+
+    // Select language (just saves selection, doesn't start recording)
+    function selectLanguage(lang) {
+      selectedLanguage = lang;
+      closeLanguageDrawer();
+    }
+
+    // Start recording in specified language
+    function startRecording(langCode) {
+      if (!speechSupported) return;
+
       recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
-
-      // Auto-detect language or default to English
-      recognition.lang = navigator.language || 'en-US';
+      recognition.lang = langCode;
 
       recognition.onstart = () => {
         isRecording = true;
@@ -1096,16 +1256,27 @@
         sendBtn.classList.remove('recording');
         updateButtonState();
 
-        // Show user-friendly error messages
         if (event.error === 'not-allowed') {
           alert('Microphone access denied. Please enable microphone permissions in your browser settings.');
-        } else if (event.error === 'no-speech') {
-          // No speech detected - this is normal, don't alert
         } else if (event.error === 'network') {
           alert('Network error during speech recognition. Please check your connection.');
         }
       };
+
+      try {
+        recognition.start();
+      } catch (e) {
+        console.error('Failed to start recognition:', e);
+        alert('Could not start voice input. Please try again.');
+      }
     }
+
+    // Close language drawer when clicking outside
+    document.addEventListener('click', (e) => {
+      if (languageDrawerOpen && !languageDrawer.contains(e.target) && e.target !== sendBtn && !sendBtn.contains(e.target)) {
+        closeLanguageDrawer();
+      }
+    });
 
     // Update button to show mic or send icon based on input state
     function updateButtonState() {
@@ -1117,28 +1288,57 @@
       }
     }
 
-    // Handle send button click - either send message or start/stop recording
+    // Long-press detection for mic button
+    let longPressTimer = null;
+    let isLongPress = false;
+    const LONG_PRESS_DURATION = 400; // ms
+
+    sendBtn.addEventListener('touchstart', (e) => {
+      // Allow long-press for language selection when not recording and no text
+      if (isRecording || messageInput.value.trim().length > 0) return;
+      isLongPress = false;
+      longPressTimer = setTimeout(() => {
+        isLongPress = true;
+        openLanguageDrawer();
+      }, LONG_PRESS_DURATION);
+    }, { passive: true });
+
+    sendBtn.addEventListener('touchend', (e) => {
+      clearTimeout(longPressTimer);
+
+      // If recording, always allow stopping
+      if (isRecording && recognition) {
+        e.preventDefault();
+        recognition.stop();
+        return;
+      }
+
+      // If has text and not recording, let click handler send
+      if (messageInput.value.trim().length > 0) return;
+
+      // No text, not recording
+      if (!isLongPress) {
+        e.preventDefault();
+        if (languageDrawerOpen) {
+          closeLanguageDrawer();
+        } else {
+          startRecording(selectedLanguage.code);
+        }
+      }
+    });
+
+    sendBtn.addEventListener('touchcancel', () => {
+      clearTimeout(longPressTimer);
+    });
+
+    // Handle send button click (for desktop and send mode)
     function handleSendButton() {
       const hasText = messageInput.value.trim().length > 0;
 
       if (hasText) {
         sendMessage();
-      } else {
-        // Try to start/stop voice recording
-        if (isRecording && recognition) {
-          recognition.stop();
-        } else if (speechSupported && recognition) {
-          try {
-            recognition.start();
-          } catch (e) {
-            console.error('Failed to start recognition:', e);
-            alert('Could not start voice input. Please try again.');
-          }
-        } else {
-          const debugInfo = `SpeechRecognition: ${!!window.SpeechRecognition}, webkitSpeechRecognition: ${!!window.webkitSpeechRecognition}`;
-          alert(`Voice input not available.\n\nDebug: ${debugInfo}\n\nIf on iOS:\n- Make sure you're in Safari (not a home screen PWA)\n- Siri must be enabled in Settings`);
-        }
       }
+      // Touch events handle mic interactions on mobile
     }
 
     // ============================================
