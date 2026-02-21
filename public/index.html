@@ -446,12 +446,11 @@
 
     /* Input area - extends .fixed-bar-bottom from global.css */
     .input-area {
-      padding: 24px 16px 12px;
-      padding-bottom: calc(12px + env(safe-area-inset-bottom));
+      padding: 24px 16px 12px 16px;
       touch-action: none; /* Prevent dragging */
     }
 
-    /* Extra padding when keyboard is closed */
+    /* Extra padding when keyboard is closed - need safe area for home indicator */
     .input-area.keyboard-closed {
       padding-bottom: calc(28px + env(safe-area-inset-bottom));
     }
@@ -2269,13 +2268,13 @@
     }, { passive: true });
 
     // ============================================
-    // KEYBOARD DETECTION - Add extra padding when keyboard is closed
+    // KEYBOARD DETECTION - Position input above keyboard on iOS
     // Only applies on actual mobile touch devices, not desktop with mobile viewport
     // ============================================
-    let maxViewportHeight = 0;
     let lastKeyboardState = null;
+    let initialViewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
 
-    function updateKeyboardState() {
+    function updateKeyboardPosition() {
       // Only do keyboard detection on actual mobile devices
       if (!isMobile) {
         inputArea.classList.add('keyboard-closed');
@@ -2283,28 +2282,36 @@
       }
 
       if (window.visualViewport) {
-        const currentHeight = window.visualViewport.height;
-        // Track max height (represents keyboard closed state)
-        maxViewportHeight = Math.max(maxViewportHeight, currentHeight);
-        // Keyboard is open if current height is significantly less than max
-        const keyboardOpen = (maxViewportHeight - currentHeight) > 150;
+        const vv = window.visualViewport;
+        // Track max height seen (keyboard closed state)
+        initialViewportHeight = Math.max(initialViewportHeight, vv.height);
 
-        // Only update if state actually changed
+        // Keyboard height is how much smaller the viewport is now
+        const keyboardHeight = initialViewportHeight - vv.height;
+        const keyboardOpen = keyboardHeight > 150;
+
+        if (keyboardOpen) {
+          // Position at bottom of visual viewport
+          const bottomPos = window.innerHeight - vv.height - vv.offsetTop;
+          inputArea.style.bottom = Math.max(0, bottomPos) + 'px';
+          inputArea.classList.remove('keyboard-closed');
+        } else {
+          inputArea.style.bottom = '0';
+          inputArea.classList.add('keyboard-closed');
+        }
+
         if (lastKeyboardState !== keyboardOpen) {
           lastKeyboardState = keyboardOpen;
-          inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
-          // Update padding immediately (no CSS transition to wait for)
           updateOutputPadding(true);
         }
       }
     }
 
     if (isMobile && window.visualViewport) {
-      window.visualViewport.addEventListener('resize', updateKeyboardState);
-      // Initial state
-      updateKeyboardState();
+      window.visualViewport.addEventListener('resize', updateKeyboardPosition);
+      window.visualViewport.addEventListener('scroll', updateKeyboardPosition);
+      updateKeyboardPosition();
     } else {
-      // Desktop or unsupported browsers: always use keyboard-closed padding
       inputArea.classList.add('keyboard-closed');
     }
 
