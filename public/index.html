@@ -545,6 +545,10 @@
       justify-content: center;
       box-shadow: 0 4px 12px rgba(215, 118, 85, 0.3);
       position: relative;
+      /* Prevent text selection on long press */
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      user-select: none;
     }
 
     .send-btn svg {
