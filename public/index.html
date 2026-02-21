@@ -1412,6 +1412,7 @@
 
         // Tab click - switch pane or close if swiped
         tab.addEventListener('click', () => {
+          animateButton(tab);
           if (tab.classList.contains('swiped')) {
             closeWindow(paneTarget);
           } else if (paneId !== activePaneId) {
@@ -1424,7 +1425,11 @@
       });
 
       // Add click handler for + button
-      paneTabs.querySelector('.pane-tab-add').addEventListener('click', createNewWindow);
+      const addBtn = paneTabs.querySelector('.pane-tab-add');
+      addBtn.addEventListener('click', () => {
+        animateButton(addBtn);
+        createNewWindow();
+      });
     }
 
     // Setup swipe gesture for a tab
