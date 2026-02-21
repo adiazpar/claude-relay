@@ -1600,8 +1600,15 @@
       // Restore state for new pane
       restorePaneState(paneId);
 
-      // Update tab UI
-      renderPaneTabs();
+      // Update tab UI - just toggle active class, don't re-render (preserves animation)
+      paneTabs.querySelectorAll('.pane-tab').forEach(t => {
+        if (t.dataset.paneId === paneId) {
+          t.classList.add('active');
+        } else {
+          t.classList.remove('active');
+          t.classList.remove('swiped'); // Reset any swiped state
+        }
+      });
 
       // Request output for this pane via WebSocket
       if (ws && connected) {
