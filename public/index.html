@@ -443,9 +443,12 @@
     }
 
 
-    /* Input area - extends .fixed-bar-bottom from global.css */
+    /* Input area - extends .fixed-bar-bottom from global.css.
+       Override the gradient background with a solid color so shortcut buttons
+       sit on an opaque bar and terminal output can't bleed through. */
     .input-area {
       padding: 24px 16px 12px 16px;
+      background: var(--bg-primary);
       touch-action: none; /* Prevent dragging */
     }
 
@@ -2264,15 +2267,11 @@
       const inputAreaBottom = parseInt(inputArea.style.bottom) || 0;
       output.style.paddingBottom = (inputAreaHeight + inputAreaBottom + CONTENT_GAP) + 'px';
 
-      // After padding changes, scroll to keep content visible
+      // Scroll to bottom once after the layout settles. Running this multiple
+      // times during the keyboard animation fights with iOS Safari's own
+      // auto-scroll and causes the output to shoot off-screen.
       if (wasAtBottom) {
-        const scrollToEnd = () => { output.scrollTop = output.scrollHeight; };
-        scrollToEnd();
-        // Follow any transitions with multiple updates
-        requestAnimationFrame(scrollToEnd);
-        setTimeout(scrollToEnd, 50);
-        setTimeout(scrollToEnd, 100);
-        setTimeout(scrollToEnd, 150);
+        requestAnimationFrame(() => { output.scrollTop = output.scrollHeight; });
       }
     }
 
@@ -2409,39 +2408,37 @@
     // KEYBOARD DETECTION - Position input above keyboard on iOS
     // Only applies on actual mobile touch devices, not desktop with mobile viewport
     // ============================================
-    let lastKeyboardState = null;
-    let initialViewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    // Compute keyboard height from the *live* viewport delta. Previously we
+    // tracked the max-ever-seen viewport height as "initial", which could lock
+    // in a stale value after rotation or window resize and produce wrong
+    // keyboard heights.
+    let lastKeyboardOpen = false;
+    let lastKeyboardHeightPx = -1;
 
     function updateKeyboardPosition() {
-      // Only do keyboard detection on actual mobile devices
       if (!isMobile) {
         inputArea.classList.add('keyboard-closed');
         return;
       }
+      if (!window.visualViewport) return;
 
-      if (window.visualViewport) {
-        const vv = window.visualViewport;
-        // Track max height seen (keyboard closed state)
-        initialViewportHeight = Math.max(initialViewportHeight, vv.height);
+      const vv = window.visualViewport;
+      // Keyboard height = how far the visual viewport bottom sits above the
+      // layout viewport bottom. Clamp to zero for safety during pinch-zoom.
+      const keyboardHeight = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      const keyboardOpen = keyboardHeight > 100;
 
-        // Keyboard height is how much smaller the viewport is now
-        const keyboardHeight = initialViewportHeight - vv.height;
-        const keyboardOpen = keyboardHeight > 150;
-
-        if (keyboardOpen) {
-          // Position at bottom of visual viewport
-          const bottomPos = window.innerHeight - vv.height - vv.offsetTop;
-          inputArea.style.bottom = Math.max(0, bottomPos) + 'px';
-          inputArea.classList.remove('keyboard-closed');
-        } else {
-          inputArea.style.bottom = '0';
-          inputArea.classList.add('keyboard-closed');
-        }
-
-        if (lastKeyboardState !== keyboardOpen) {
-          lastKeyboardState = keyboardOpen;
-          updateOutputPadding(true);
-        }
+      // Only touch the DOM when the keyboard height actually changed, to avoid
+      // thrashing during the open/close animation.
+      if (keyboardHeight !== lastKeyboardHeightPx) {
+        lastKeyboardHeightPx = keyboardHeight;
+        inputArea.style.bottom = keyboardHeight + 'px';
+        inputArea.classList.toggle('keyboard-closed', !keyboardOpen);
+        // Recompute output padding so the input bar doesn't occlude content.
+        // Only force-scroll on the open<->closed transition, not on every
+        // intermediate animation frame.
+        updateOutputPadding(keyboardOpen !== lastKeyboardOpen);
+        lastKeyboardOpen = keyboardOpen;
       }
     }
 
