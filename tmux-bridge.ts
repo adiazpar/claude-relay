@@ -278,7 +278,14 @@ export class TmuxBridge extends EventEmitter {
           const cmd = this.runTmux(['display-message', '-t', target, '-p', '#{pane_current_command}']).trim()
           if (this.isShellCommand(cmd)) {
             this.runTmux(['send-keys', '-t', target, 'C-l'])
-            this.runTmux(['clear-history', '-t', target])
+            // Some zsh themes (p10k transient prompt, precmd hooks) redraw
+            // asynchronously after Ctrl-L. Delay clear-history so any stale
+            // prompt that lands in scrollback during that redraw is dropped
+            // along with the earlier scrollback.
+            const cleanupTarget = target
+            setTimeout(() => {
+              try { this.runTmux(['clear-history', '-t', cleanupTarget]) } catch {}
+            }, 250)
             return true
           }
         } catch {
