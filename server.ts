@@ -327,6 +327,18 @@ tmuxBridge.on('output', (rawContent: string, paneId: string, paneTarget: string)
   })
 })
 
+// Heartbeat: send a tiny ping to every open client so the browser can detect
+// dead sockets after an iOS tab backgrounds and kills the underlying TCP.
+const HEARTBEAT_INTERVAL_MS = 15000
+setInterval(() => {
+  const payload = JSON.stringify({ type: 'ping', t: Date.now() })
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(payload) } catch {}
+    }
+  })
+}, HEARTBEAT_INTERVAL_MS)
+
 // Start polling for output changes
 tmuxBridge.startPolling()
 

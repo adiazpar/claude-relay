@@ -1167,6 +1167,7 @@
     let connected = false;
     let lastCols = 0;
     let resizeTimeout = null;
+    let lastRxTime = Date.now(); // updated on any inbound WS message (incl. pings)
 
     // ============================================
     // MOBILE DETECTION
@@ -1477,6 +1478,7 @@
       ws.onopen = () => {
         connected = true;
         reconnectDelay = RECONNECT_MIN;
+        lastRxTime = Date.now();
         updateStatus();
         sendResize();
       };
@@ -1494,6 +1496,7 @@
       };
 
       ws.onmessage = (event) => {
+        lastRxTime = Date.now();
         let msg;
         try {
           msg = JSON.parse(event.data);
@@ -1501,6 +1504,7 @@
           console.error('Invalid WS message:', err);
           return;
         }
+        if (msg && msg.type === 'ping') return; // heartbeat only
         handleMessage(msg);
       };
     }
@@ -2303,32 +2307,49 @@
     });
 
     // ============================================
-    // CONNECTION RECOVERY - Only recover if connection is actually broken
+    // CONNECTION RECOVERY
     // ============================================
-    function recover() {
-      // Only recover if WebSocket is closed or in error state
-      // Don't interrupt an active or connecting WebSocket
-      if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-        return;
-      }
+    // iOS Safari silently kills WebSocket sockets when the tab is backgrounded
+    // but leaves ws.readyState reporting OPEN, producing a zombie connection.
+    // So we don't trust readyState on resume — we rely on message freshness.
+    // The server sends a ping every 15s; any message (ping or real) refreshes
+    // lastRxTime. If we haven't heard from the server recently, assume the
+    // socket is dead and force a reconnect.
+    const FRESHNESS_THRESHOLD_MS = 20000; // no message in 20s -> assume dead
+    const WATCHDOG_INTERVAL_MS = 5000;
 
-      // Kill stale WebSocket
+    function forceReconnect() {
       if (ws) {
         ws.onclose = null;
-        try { ws.close(); } catch(e) {}
+        ws.onmessage = null;
+        ws.onerror = null;
+        try { ws.close(); } catch {}
+        ws = null;
       }
-      // Re-initialize everything
+      connected = false;
+      updateStatus();
+      reconnectDelay = RECONNECT_MIN;
       initializeFromREST();
       connect();
     }
 
-    // These events trigger recovery only if connection is broken
+    function recoverIfStale() {
+      const stale = Date.now() - lastRxTime > FRESHNESS_THRESHOLD_MS;
+      const noSocket = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+      if (stale || noSocket) forceReconnect();
+    }
+
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') recover();
+      if (document.visibilityState === 'visible') recoverIfStale();
     });
-    window.addEventListener('pageshow', () => recover());
-    window.addEventListener('focus', () => recover());
-    window.addEventListener('online', () => recover());
+    window.addEventListener('pageshow', () => recoverIfStale());
+    window.addEventListener('focus', () => recoverIfStale());
+    window.addEventListener('online', () => recoverIfStale());
+
+    // Background watchdog: catches zombie sockets even without visibility events
+    setInterval(() => {
+      if (document.visibilityState === 'visible') recoverIfStale();
+    }, WATCHDOG_INTERVAL_MS);
 
     // ============================================
     // iOS SCROLL FIXES
