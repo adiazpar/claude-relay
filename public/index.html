@@ -331,7 +331,6 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 4px 12px rgba(215, 118, 85, 0.3);
       padding: 6px;
     }
 
@@ -365,13 +364,11 @@
       height: 8px;
       border-radius: 50%;
       background: var(--error);
-      box-shadow: 0 0 8px var(--error);
       animation: pulse 2s ease-in-out infinite;
     }
 
     .status-dot.connected {
       background: var(--success);
-      box-shadow: 0 0 8px var(--success);
     }
 
     @keyframes pulse {
@@ -417,17 +414,7 @@
       }
     }
 
-    /* Virtual scroll spacer - creates scrollable height */
-    .virtual-spacer {
-      width: 100%;
-      pointer-events: none;
-    }
-
-    /* Visible rows container - positioned absolutely */
-    .virtual-content {
-      position: absolute;
-      left: 0;
-      right: 0;
+    .terminal-content {
       padding: 0 16px;
       font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
       font-size: 12px;
@@ -443,9 +430,7 @@
     }
 
 
-    /* Input area - extends .fixed-bar-bottom from global.css.
-       Override the gradient background with a solid color so shortcut buttons
-       sit on an opaque bar and terminal output can't bleed through. */
+    /* Input area - extends .fixed-bar-bottom from global.css. */
     .input-area {
       padding: 24px 16px 12px 16px;
       background: var(--bg-primary);
@@ -508,7 +493,6 @@
       border: 1px solid transparent;
       border-radius: 22px;
       background: var(--bg-input);
-      box-shadow: 0 2px 8px var(--shadow);
       transition: all 0.2s ease;
     }
 
@@ -555,7 +539,6 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 4px 12px rgba(215, 118, 85, 0.3);
       position: relative;
       /* Prevent text selection on long press */
       -webkit-user-select: none;
@@ -593,10 +576,10 @@
 
     @keyframes recording-pulse {
       0%, 100% {
-        box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.4);
+        opacity: 1;
       }
       50% {
-        box-shadow: 0 0 0 8px rgba(229, 57, 53, 0);
+        opacity: 0.7;
       }
     }
 
@@ -876,8 +859,7 @@
   <div class="pane-tabs hidden" id="paneTabs"></div>
 
   <div class="output-container" id="output">
-    <div class="virtual-spacer" id="virtualSpacer"></div>
-    <div class="virtual-content" id="virtualContent"></div>
+    <div class="terminal-content" id="terminalContent"></div>
   </div>
 
   <!-- Tab action sheet -->
@@ -1098,8 +1080,7 @@
     // DOM ELEMENTS
     // ============================================
     const output = document.getElementById('output');
-    const virtualSpacer = document.getElementById('virtualSpacer');
-    const virtualContent = document.getElementById('virtualContent');
+    const terminalContent = document.getElementById('terminalContent');
     const messageInput = document.getElementById('messageInput');
     const sendBtn = document.getElementById('sendBtn');
     const statusDot = document.getElementById('statusDot');
@@ -1146,10 +1127,9 @@
     }
 
     // ============================================
-    // VIRTUAL SCROLLING STATE
+    // OUTPUT STATE
     // ============================================
-    const ROW_HEIGHT = 16.8; // 12px font * 1.4 line-height
-    const BUFFER_ROWS = 5;   // Extra rows above/below viewport
+    const MAX_TERMINAL_LINES = 2000;
 
     // allLines is now stored per-pane in PaneState
     // Helper to get current pane's lines
@@ -1159,9 +1139,9 @@
       return state ? state.allLines : [];
     }
 
-    let renderedRange = { start: 0, end: 0 };
     let followMode = true;   // Auto-scroll to bottom
-    let scrollRAF = null;    // RequestAnimationFrame for scroll handling
+    let scrollIdleTimer = null;
+    let isUserScrolling = false;
 
     // ============================================
     // CONNECTION STATE
@@ -1312,73 +1292,25 @@
       });
     }
 
-    // ============================================
-    // VIRTUAL SCROLLING FUNCTIONS
-    // ============================================
-    // PADDING_TOP is dynamic based on whether tabs are visible
-    function getPaddingTop() {
-      return output.classList.contains('with-tabs') ? 104 : 60;
-    }
-
-    function getVisibleRange() {
-      const scrollTop = output.scrollTop;
-      const viewportHeight = output.clientHeight;
-      const paddingTop = getPaddingTop();
+    function renderOutput() {
       const lines = getAllLines();
-
-      const startRow = Math.max(0, Math.floor((scrollTop - paddingTop) / ROW_HEIGHT) - BUFFER_ROWS);
-      const endRow = Math.min(lines.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + BUFFER_ROWS);
-
-      return { start: startRow, end: endRow };
-    }
-
-    let lastContentVersion = 0; // Track when content changes
-
-    function renderVisibleLines(forceRender = false) {
-      const range = getVisibleRange();
-      const lines = getAllLines();
-
-      // Skip if range hasn't changed AND we're not forcing a render
-      if (!forceRender &&
-          range.start === renderedRange.start &&
-          range.end === renderedRange.end) {
-        return;
-      }
-
-      renderedRange = range;
-
-      // Build HTML for visible lines only (convert ANSI to HTML client-side)
-      const visibleLines = lines.slice(range.start, range.end);
-      const html = visibleLines.map(line =>
+      const html = lines.map(line =>
         `<div class="terminal-line">${ansiToHtml(line)}</div>`
       ).join('');
-
-      // Position the content
-      const paddingTop = getPaddingTop();
-      virtualContent.style.top = (paddingTop + range.start * ROW_HEIGHT) + 'px';
-      virtualContent.innerHTML = html;
+      terminalContent.innerHTML = html;
     }
 
-    function updateVirtualHeight() {
-      // Don't add PADDING_TOP here - the CSS padding-top on the container already creates that space
-      // Adding it here creates a 60px gap at the bottom of the content
-      const lines = getAllLines();
-      const totalHeight = lines.length * ROW_HEIGHT;
-      virtualSpacer.style.height = totalHeight + 'px';
+    function getScrollBottom() {
+      return output.scrollHeight - output.scrollTop - output.clientHeight;
     }
 
     function handleScroll() {
-      // Cancel any pending RAF
-      if (scrollRAF) cancelAnimationFrame(scrollRAF);
-
-      // Use RAF to batch scroll handling
-      scrollRAF = requestAnimationFrame(() => {
-        // Check if user scrolled away from bottom
-        const scrollBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
-        followMode = scrollBottom < 50; // Within 50px of bottom = follow mode
-
-        renderVisibleLines();
-      });
+      followMode = getScrollBottom() < 50;
+      isUserScrolling = true;
+      if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
+      scrollIdleTimer = setTimeout(() => {
+        isUserScrolling = false;
+      }, 120);
     }
 
     function scrollToBottom() {
@@ -1400,7 +1332,10 @@
       while (end > start && lines[end - 1].trim() === '') {
         end--;
       }
-      return lines.slice(start, end);
+      const trimmed = lines.slice(start, end);
+      return trimmed.length > MAX_TERMINAL_LINES
+        ? trimmed.slice(-MAX_TERMINAL_LINES)
+        : trimmed;
     }
 
     function applyLinesUpdate(lines, mode, paneId) {
@@ -1414,8 +1349,7 @@
 
       // Only update display if this is for the active pane
       if (targetPaneId === activePaneId) {
-        updateVirtualHeight();
-        renderVisibleLines(true); // Force re-render since content changed
+        renderOutput();
         scrollToBottom();
       }
     }
@@ -1450,7 +1384,7 @@
       if (resizeTimeout) clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         sendResize();
-        renderVisibleLines(); // Re-render on resize
+        renderOutput();
       }, 150);
     }
 
@@ -1936,8 +1870,7 @@
       fetchCommands(pane.cwd);
 
       // Re-render with the new pane's lines
-      updateVirtualHeight();
-      renderVisibleLines(true);
+      renderOutput();
       scrollToBottom();
     }
 
@@ -2260,7 +2193,7 @@
 
     function updateOutputPadding(forceScroll = false) {
       // Check if we're currently at the bottom before changing padding
-      const wasAtBottom = forceScroll || (output.scrollHeight - output.scrollTop - output.clientHeight) < 50;
+      const wasAtBottom = forceScroll || getScrollBottom() < 50;
 
       const inputAreaHeight = inputArea.offsetHeight;
       // Account for input area's bottom position (keyboard pushes it up)
@@ -2270,7 +2203,7 @@
       // Scroll to bottom once after the layout settles. Running this multiple
       // times during the keyboard animation fights with iOS Safari's own
       // auto-scroll and causes the output to shoot off-screen.
-      if (wasAtBottom) {
+      if (wasAtBottom && (forceScroll || !isUserScrolling)) {
         requestAnimationFrame(() => { output.scrollTop = output.scrollHeight; });
       }
     }

@@ -19,7 +19,6 @@
   --error: #ef4444;
   --border: #3a382f;
   --border-light: #4a483f;
-  --shadow: rgba(0, 0, 0, 0.3);
 }
 
 /* Base reset */
@@ -40,35 +39,26 @@ button:active {
   transform: scale(0.95);
 }
 
-/* Fixed bar gradient - top (header) */
+/* Fixed top bar */
 .fixed-bar-top {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  background: linear-gradient(
-    to top,
-    rgba(26, 25, 21, 0) 0%,
-    rgba(26, 25, 21, 0.8) 30%,
-    rgba(26, 25, 21, 1) 60%
-  );
+  background: var(--bg-primary);
   z-index: 50;
   -webkit-transform: translateZ(0);
   transform: translateZ(0);
 }
 
-/* Fixed bar gradient - bottom (input area) */
+/* Fixed bottom bar */
 .fixed-bar-bottom {
   position: fixed;
   bottom: 0;
   left: 0;
   right: 0;
-  background: linear-gradient(
-    to bottom,
-    rgba(26, 25, 21, 0) 0%,
-    rgba(26, 25, 21, 0.8) 30%,
-    rgba(26, 25, 21, 1) 60%
-  );
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border);
   z-index: 50;
   -webkit-transform: translateZ(0);
   transform: translateZ(0);
