@@ -68,6 +68,13 @@ const wss = new WebSocketServer({
 
 const HOST = process.env.HOST || '0.0.0.0' // Listen on all interfaces for Tailscale
 
+function serializePanes() {
+  return tmuxBridge.listPanes().map(pane => ({
+    ...pane,
+    ...tmuxBridge.getPaneRuntimeState(pane.target)
+  }))
+}
+
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')))
 app.use(express.json({ limit: '128kb' }))
@@ -102,7 +109,7 @@ app.get('/api/output', (req, res) => {
 
 // Get all available panes
 app.get('/api/panes', (req, res) => {
-  const panes = tmuxBridge.listPanes()
+  const panes = serializePanes()
   res.json({ panes })
 })
 
@@ -111,7 +118,11 @@ app.post('/api/panes', (req, res) => {
   const cwd = validateCwd(req.body?.cwd) ?? undefined
   const newPane = tmuxBridge.createWindow(cwd)
   if (newPane) {
-    res.json({ success: true, pane: newPane, panes: tmuxBridge.listPanes() })
+    res.json({
+      success: true,
+      pane: { ...newPane, ...tmuxBridge.getPaneRuntimeState(newPane.target) },
+      panes: serializePanes()
+    })
   } else {
     res.status(500).json({ success: false, error: 'Failed to create window' })
   }
@@ -125,7 +136,7 @@ app.post('/api/panes/close', (req, res) => {
   }
   const success = tmuxBridge.closeWindow(target)
   if (success) {
-    res.json({ success: true, panes: tmuxBridge.listPanes() })
+    res.json({ success: true, panes: serializePanes() })
   } else {
     res.status(500).json({ success: false, error: 'Failed to close window' })
   }
@@ -213,7 +224,7 @@ wss.on('connection', (ws: WebSocket) => {
   })
 
   // Initialize client state
-  const panes = tmuxBridge.listPanes()
+  const panes = serializePanes()
   const initialPane = panes[0] || null
   clientStates.set(ws, {
     activePane: initialPane?.id || null,
@@ -261,7 +272,7 @@ wss.on('connection', (ws: WebSocket) => {
 
       if (msg.type === 'switchPane') {
         // Client is switching to a different pane
-        const panes = tmuxBridge.listPanes()
+        const panes = serializePanes()
         const pane = panes.find(p => p.id === msg.paneId)
         if (pane && clientState) {
           clientState.activePane = pane.id
@@ -273,7 +284,8 @@ wss.on('connection', (ws: WebSocket) => {
             type: 'output',
             paneId: pane.id,
             lines: toLines(tmuxBridge.getFullOutput(pane.target)),
-            mode: tmuxBridge.detectMode(pane.target)
+            mode: tmuxBridge.detectMode(pane.target),
+            ...tmuxBridge.getPaneRuntimeState(pane.target)
           }))
         }
       } else if (msg.type === 'send') {
@@ -308,7 +320,7 @@ wss.on('connection', (ws: WebSocket) => {
         }))
       } else if (msg.type === 'refresh') {
         // Refresh pane list
-        const panes = tmuxBridge.listPanes()
+        const panes = serializePanes()
         ws.send(JSON.stringify({
           type: 'paneList',
           panes
@@ -319,7 +331,8 @@ wss.on('connection', (ws: WebSocket) => {
           type: 'output',
           paneId: clientState?.activePane,
           lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
-          mode: tmuxBridge.detectMode(paneTarget)
+          mode: tmuxBridge.detectMode(paneTarget),
+          ...tmuxBridge.getPaneRuntimeState(paneTarget)
         }))
       } else if (msg.type === 'resize') {
         const cols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
@@ -333,7 +346,8 @@ wss.on('connection', (ws: WebSocket) => {
               type: 'output',
               paneId: clientState?.activePane,
               lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
-              mode: tmuxBridge.detectMode(paneTarget)
+              mode: tmuxBridge.detectMode(paneTarget),
+              ...tmuxBridge.getPaneRuntimeState(paneTarget)
             }))
           }, 100)
         }
@@ -357,7 +371,8 @@ tmuxBridge.on('output', (rawContent: string, paneId: string, paneTarget: string)
     type: 'output',
     paneId,
     lines: toLines(rawContent),
-    mode: tmuxBridge.detectMode(paneTarget)
+    mode: tmuxBridge.detectMode(paneTarget),
+    ...tmuxBridge.getPaneRuntimeState(paneTarget)
   })
 
   wss.clients.forEach((client) => {
@@ -386,6 +401,20 @@ setInterval(() => {
     }
   })
 }, HEARTBEAT_INTERVAL_MS)
+
+// Broadcast per-pane runtime state to all clients so every tab's button can
+// reflect current claudeRunning/shellReady regardless of which pane is active.
+const PANE_STATE_BROADCAST_MS = 2000
+setInterval(() => {
+  if (wss.clients.size === 0) return
+  const states = tmuxBridge.getAllPaneRuntimeStates()
+  const payload = JSON.stringify({ type: 'paneRuntimeList', states })
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(payload) } catch {}
+    }
+  })
+}, PANE_STATE_BROADCAST_MS)
 
 // Start polling for output changes
 tmuxBridge.startPolling()

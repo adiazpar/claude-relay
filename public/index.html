@@ -483,6 +483,16 @@
       transform: scale(0.97);
     }
 
+    .shortcut-btn:disabled,
+    .shortcut-btn.disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      border-color: var(--border);
+      color: var(--text-muted);
+      background: var(--bg-tertiary);
+      transform: none;
+    }
+
 
     /* Input row - this IS the styled input field */
     .input-row {
@@ -905,14 +915,14 @@
         </svg>
         <span>Enter</span>
       </button>
-      <button class="shortcut-btn" onclick="sendKey('S-Tab')" title="Switch Mode (Shift+Tab)" style="margin-left: auto;">
+      <button class="shortcut-btn" id="modeActionBtn" onclick="handleModeAction()" title="Switch Mode (Shift+Tab)" style="margin-left: auto;">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M17 2.1l4 4-4 4"/>
-          <path d="M3 12.2v-2a4 4 0 0 1 4-4h12.8"/>
-          <path d="M7 21.9l-4-4 4-4"/>
-          <path d="M21 11.8v2a4 4 0 0 1-4 4H4.2"/>
+          <path id="modeActionIconPath1" d="M17 2.1l4 4-4 4"/>
+          <path id="modeActionIconPath2" d="M3 12.2v-2a4 4 0 0 1 4-4h12.8"/>
+          <path id="modeActionIconPath3" d="M7 21.9l-4-4 4-4"/>
+          <path id="modeActionIconPath4" d="M21 11.8v2a4 4 0 0 1-4 4H4.2"/>
         </svg>
-        <span>Change mode</span>
+        <span id="modeActionLabel">Change mode</span>
       </button>
       <button class="commands-btn" id="commandsBtn" onclick="toggleCommandPalette()" title="Slash Commands" aria-label="Slash commands">/</button>
     </div>
@@ -1089,6 +1099,12 @@
     const commandPaletteContent = document.getElementById('commandPaletteContent');
     const commandList = document.getElementById('commandList');
     const commandsBtn = document.getElementById('commandsBtn');
+    const modeActionBtn = document.getElementById('modeActionBtn');
+    const modeActionLabel = document.getElementById('modeActionLabel');
+    const modeActionIconPath1 = document.getElementById('modeActionIconPath1');
+    const modeActionIconPath2 = document.getElementById('modeActionIconPath2');
+    const modeActionIconPath3 = document.getElementById('modeActionIconPath3');
+    const modeActionIconPath4 = document.getElementById('modeActionIconPath4');
     const paneTabs = document.getElementById('paneTabs');
 
     // ============================================
@@ -1099,6 +1115,9 @@
       constructor(paneId, cwd) {
         this.paneId = paneId;
         this.cwd = cwd;
+        this.claudeRunning = false;
+        this.shellReady = false;
+        this.currentCommand = '';
         this.inputText = '';
         this.selectedLanguage = null;  // Set to languages[0] when restored
         this.allLines = [];
@@ -1137,6 +1156,11 @@
       if (!activePaneId) return [];
       const state = paneStates.get(activePaneId);
       return state ? state.allLines : [];
+    }
+
+    function getActivePaneState() {
+      if (!activePaneId) return null;
+      return paneStates.get(activePaneId) || null;
     }
 
     let followMode = true;   // Auto-scroll to bottom
@@ -1354,6 +1378,49 @@
       }
     }
 
+    function updatePaneRuntimeState(paneId, runtimeState = {}) {
+      if (!paneId || !paneStates.has(paneId)) return;
+      const state = paneStates.get(paneId);
+      if (typeof runtimeState.claudeRunning === 'boolean') {
+        state.claudeRunning = runtimeState.claudeRunning;
+      }
+      if (typeof runtimeState.shellReady === 'boolean') {
+        state.shellReady = runtimeState.shellReady;
+      }
+      if (typeof runtimeState.currentCommand === 'string') {
+        state.currentCommand = runtimeState.currentCommand;
+      }
+      if (paneId === activePaneId) {
+        updateModeActionButton();
+      }
+    }
+
+    function updateModeActionButton() {
+      const state = getActivePaneState();
+      const claudeRunning = state?.claudeRunning === true;
+
+      modeActionBtn.disabled = false;
+      modeActionBtn.classList.remove('disabled');
+
+      if (claudeRunning) {
+        modeActionLabel.textContent = 'Change mode';
+        modeActionBtn.title = 'Switch Mode (Shift+Tab)';
+        modeActionBtn.setAttribute('aria-label', 'Change mode');
+        modeActionIconPath1.setAttribute('d', 'M17 2.1l4 4-4 4');
+        modeActionIconPath2.setAttribute('d', 'M3 12.2v-2a4 4 0 0 1 4-4h12.8');
+        modeActionIconPath3.setAttribute('d', 'M7 21.9l-4-4 4-4');
+        modeActionIconPath4.setAttribute('d', 'M21 11.8v2a4 4 0 0 1-4 4H4.2');
+      } else {
+        modeActionLabel.textContent = 'Start Claude';
+        modeActionBtn.title = 'Start Claude Code';
+        modeActionBtn.setAttribute('aria-label', 'Start Claude');
+        modeActionIconPath1.setAttribute('d', 'M4 5h16');
+        modeActionIconPath2.setAttribute('d', 'M4 19h10');
+        modeActionIconPath3.setAttribute('d', 'm5 9 3 3 5-5');
+        modeActionIconPath4.setAttribute('d', '');
+      }
+    }
+
     function scheduleOutputUpdate(lines, mode, paneId) {
       // Apply immediately - virtual scrolling is efficient
       applyLinesUpdate(lines, mode, paneId);
@@ -1506,8 +1573,17 @@
           break;
 
         case 'output':
+          updatePaneRuntimeState(msg.paneId, msg);
           if (msg.lines) {
             scheduleOutputUpdate(msg.lines, msg.mode, msg.paneId);
+          }
+          break;
+
+        case 'paneRuntimeList':
+          if (Array.isArray(msg.states)) {
+            for (const state of msg.states) {
+              updatePaneRuntimeState(state.paneId, state);
+            }
           }
           break;
 
@@ -1531,6 +1607,7 @@
           // Update cwd in case it changed
           paneStates.get(pane.id).cwd = pane.cwd;
         }
+        updatePaneRuntimeState(pane.id, pane);
       }
 
       // Remove state for panes that no longer exist
@@ -1555,6 +1632,12 @@
         }
         // Restore per-pane state from localStorage
         restorePaneState(activePaneId);
+
+        // Sync server's view of our active pane so it sends output for the
+        // restored pane, not the default first pane.
+        if (isSocketUsable()) {
+          ws.send(JSON.stringify({ type: 'switchPane', paneId: activePaneId }));
+        }
       }
 
       // Handle pane closure - switch to first available
@@ -1563,6 +1646,7 @@
       }
 
       renderPaneTabs();
+      updateModeActionButton();
     }
 
     // Render pane tabs
@@ -1897,6 +1981,10 @@
       // Restore state for new pane
       restorePaneState(paneId);
 
+      // Repaint button immediately from cached state so it doesn't flash the
+      // previous pane's label while waiting for the server switchPane response.
+      updateModeActionButton();
+
       // Update tab UI - just toggle active class, don't re-render (preserves animation)
       paneTabs.querySelectorAll('.pane-tab').forEach(t => {
         if (t.dataset.paneId === paneId) {
@@ -2003,6 +2091,51 @@
     document.querySelectorAll('button').forEach(btn => {
       btn.addEventListener('click', () => animateButton(btn));
     });
+
+    function sendTerminalCommand(command, target = activePaneTarget) {
+      if (!command || !target) return Promise.resolve(false);
+
+      if (isSocketUsable()) {
+        ws.send(JSON.stringify({ type: 'send', content: command, paneTarget: target }));
+        return Promise.resolve(true);
+      }
+
+      return fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: command, target })
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (!data.success) {
+            console.error('Failed to send command');
+          }
+          scheduleResumeSync('sendTerminalCommand');
+          return data.success === true;
+        })
+        .catch(error => {
+          console.error('Failed to send command via REST:', error);
+          return false;
+        });
+    }
+
+    async function startClaudeInActivePane() {
+      const target = activePaneTarget;
+      if (!target) return;
+
+      await sendTerminalCommand('clear', target);
+      await sendTerminalCommand('clear', target);
+      await sendTerminalCommand('claude --dangerously-skip-permissions', target);
+    }
+
+    function handleModeAction() {
+      const state = getActivePaneState();
+      if (state?.claudeRunning) {
+        sendKey('S-Tab');
+        return;
+      }
+      startClaudeInActivePane();
+    }
 
     function sendMessage() {
       const message = messageInput.value.trim();

@@ -16,8 +16,17 @@ export interface PaneInfo {
   index: number        // window index
   windowIndex: number  // window index (same as index)
   cwd: string          // current working directory of active pane in window
+  panePid: number      // pid of the active pane's process tree root
+  currentCommand: string // tmux-reported current command in the active pane
+  paneTitle: string    // tmux-reported pane title (set by the TUI via OSC escapes)
   width: number
   height: number
+}
+
+export interface PaneRuntimeState {
+  claudeRunning: boolean
+  shellReady: boolean
+  currentCommand: string
 }
 
 export class TmuxBridge extends EventEmitter {
@@ -42,6 +51,84 @@ export class TmuxBridge extends EventEmitter {
     })
   }
 
+  private listProcesses(): Array<{ pid: number; ppid: number; command: string }> {
+    try {
+      const output = execFileSync('ps', ['-ax', '-o', 'pid=,ppid=,command='], {
+        encoding: 'utf-8',
+        maxBuffer: MAX_BUFFER,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+
+      return output.trim().split('\n').filter(Boolean).map(line => {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)
+        if (!match) {
+          return null
+        }
+        return {
+          pid: parseInt(match[1], 10),
+          ppid: parseInt(match[2], 10),
+          command: match[3]
+        }
+      }).filter((row): row is { pid: number; ppid: number; command: string } => row !== null)
+    } catch (error) {
+      console.error('Failed to list processes:', error)
+      return []
+    }
+  }
+
+  private isClaudeCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase()
+    return /(^|[\/\s])claude($|\s)/.test(normalized)
+  }
+
+  // Claude Code sets process.title to its version string (e.g. "2.1.114"),
+  // which is what tmux reports as pane_current_command.
+  private looksLikeClaudeVersion(command: string): boolean {
+    return /^\d+\.\d+\.\d+/.test(command.trim())
+  }
+
+  private isShellCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase()
+    return /(^|\/)(bash|zsh|sh|fish|ksh|tcsh|csh|dash|nu)$/.test(normalized)
+  }
+
+  private hasClaudeProcessInTree(rootPid: number): boolean {
+    if (!Number.isInteger(rootPid) || rootPid <= 0) return false
+
+    const processes = this.listProcesses()
+    if (processes.length === 0) return false
+
+    const childrenByParent = new Map<number, number[]>()
+    for (const proc of processes) {
+      if (!childrenByParent.has(proc.ppid)) {
+        childrenByParent.set(proc.ppid, [])
+      }
+      childrenByParent.get(proc.ppid)!.push(proc.pid)
+    }
+
+    const processByPid = new Map(processes.map(proc => [proc.pid, proc]))
+    const stack = [rootPid]
+    const seen = new Set<number>()
+
+    while (stack.length > 0) {
+      const pid = stack.pop()!
+      if (seen.has(pid)) continue
+      seen.add(pid)
+
+      const proc = processByPid.get(pid)
+      if (proc && this.isClaudeCommand(proc.command)) {
+        return true
+      }
+
+      const children = childrenByParent.get(pid) || []
+      for (const childPid of children) {
+        stack.push(childPid)
+      }
+    }
+
+    return false
+  }
+
   sessionExists(): boolean {
     try {
       execFileSync('tmux', ['has-session', '-t', TMUX_SESSION], { stdio: 'ignore' })
@@ -58,17 +145,20 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      const fmt = '#{window_id}\t#{session_name}:#{window_index}\t#{window_index}\t#{window_index}\t#{pane_current_path}\t#{window_width}\t#{window_height}'
+      const fmt = '#{window_id}\t#{session_name}:#{window_index}\t#{window_index}\t#{window_index}\t#{pane_current_path}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}\t#{window_width}\t#{window_height}'
       const output = this.runTmux(['list-windows', '-t', TMUX_SESSION, '-F', fmt])
 
       const panes: PaneInfo[] = output.trim().split('\n').filter(Boolean).map(line => {
-        const [id, target, index, windowIndex, cwd, width, height] = line.split('\t')
+        const [id, target, index, windowIndex, cwd, panePid, currentCommand, paneTitle, width, height] = line.split('\t')
         return {
           id,
           target,
           index: parseInt(index, 10),
           windowIndex: parseInt(windowIndex, 10),
           cwd,
+          panePid: parseInt(panePid, 10),
+          currentCommand,
+          paneTitle: paneTitle || '',
           width: parseInt(width, 10),
           height: parseInt(height, 10)
         }
@@ -258,11 +348,45 @@ export class TmuxBridge extends EventEmitter {
     return this.capturePane(CAPTURE_LINES, target)
   }
 
-  // Check if Claude Code is running (look for the mode indicator unique to Claude Code UI)
+  private computePaneRuntimeState(pane: PaneInfo): PaneRuntimeState {
+    const claudeRunning =
+      this.isClaudeCommand(pane.currentCommand) ||
+      this.looksLikeClaudeVersion(pane.currentCommand) ||
+      this.hasClaudeProcessInTree(pane.panePid)
+    const shellReady = !claudeRunning && this.isShellCommand(pane.currentCommand)
+
+    return {
+      claudeRunning,
+      shellReady,
+      currentCommand: pane.currentCommand
+    }
+  }
+
+  getPaneRuntimeState(target?: string): PaneRuntimeState {
+    if (!target) {
+      return { claudeRunning: false, shellReady: false, currentCommand: '' }
+    }
+
+    const pane = this.listPanes().find(p => p.target === target)
+    if (!pane) {
+      return { claudeRunning: false, shellReady: false, currentCommand: '' }
+    }
+
+    return this.computePaneRuntimeState(pane)
+  }
+
+  // Batch version used by periodic broadcast — one listPanes + one ps pass.
+  getAllPaneRuntimeStates(): Array<{ paneId: string; target: string } & PaneRuntimeState> {
+    return this.listPanes().map(pane => ({
+      paneId: pane.id,
+      target: pane.target,
+      ...this.computePaneRuntimeState(pane)
+    }))
+  }
+
+  // Check if Claude Code is running in the pane's process tree.
   isClaudeRunning(target?: string): boolean {
-    const output = this.capturePane(50, target).replace(ANSI_RE, '')
-    // Look for Claude Code's mode selector "(shift+tab to cycle)" which is unique to its UI
-    return /shift\s*\+\s*tab/i.test(output)
+    return this.getPaneRuntimeState(target).claudeRunning
   }
 
   // Detect current Claude Code permission mode from output
