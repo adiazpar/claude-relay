@@ -27,6 +27,8 @@ export interface PaneRuntimeState {
   claudeRunning: boolean
   shellReady: boolean
   currentCommand: string
+  serverRunning: boolean
+  serverCommand: string | null
 }
 
 export class TmuxBridge extends EventEmitter {
@@ -90,6 +92,71 @@ export class TmuxBridge extends EventEmitter {
   private isShellCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase()
     return /(^|\/)(bash|zsh|sh|fish|ksh|tcsh|csh|dash|nu)$/.test(normalized)
+  }
+
+  // All PIDs currently listening on a TCP socket, system-wide. One lsof
+  // call per detection cycle is cheaper than per-pane queries, and the
+  // caller intersects this against each pane's own process tree — so a
+  // backend server in pane A and a frontend server in pane B never cross
+  // streams.
+  private listListeningPids(): Set<number> {
+    try {
+      const output = execFileSync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fp'], {
+        encoding: 'utf-8',
+        maxBuffer: MAX_BUFFER,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      const pids = new Set<number>()
+      for (const line of output.split('\n')) {
+        if (line.startsWith('p')) {
+          const pid = parseInt(line.slice(1), 10)
+          if (Number.isInteger(pid) && pid > 0) pids.add(pid)
+        }
+      }
+      return pids
+    } catch {
+      // lsof missing or blocked — server detection is a best-effort signal,
+      // treat it as "no servers visible" and fall through to normal UI.
+      return new Set()
+    }
+  }
+
+  // Given a pane's shell pid and the global set of listening pids, find the
+  // shell-level command the user typed to start a server. Walks each direct
+  // child of the shell; if any descendant of that child is a listener, the
+  // child's own argv is the shell-level command. This preserves the user's
+  // intent for wrapped invocations (`npm run dev` → node listens, but we
+  // return `npm run dev`) while still giving the exact string for direct
+  // invocations (`python3 manage.py runserver` IS the listener).
+  private findServerShellCommand(panePid: number, listeningPids: Set<number>): string | null {
+    if (!Number.isInteger(panePid) || panePid <= 0) return null
+    if (listeningPids.size === 0) return null
+
+    const processes = this.listProcesses()
+    if (processes.length === 0) return null
+
+    const byParent = new Map<number, Array<{ pid: number; ppid: number; command: string }>>()
+    for (const proc of processes) {
+      if (!byParent.has(proc.ppid)) byParent.set(proc.ppid, [])
+      byParent.get(proc.ppid)!.push(proc)
+    }
+
+    const directChildren = byParent.get(panePid) || []
+    for (const child of directChildren) {
+      const stack = [child.pid]
+      const seen = new Set<number>()
+      while (stack.length > 0) {
+        const pid = stack.pop()!
+        if (seen.has(pid)) continue
+        seen.add(pid)
+        if (listeningPids.has(pid)) {
+          return child.command.trim()
+        }
+        const kids = byParent.get(pid) || []
+        for (const k of kids) stack.push(k.pid)
+      }
+    }
+    return null
   }
 
   private hasClaudeProcessInTree(rootPid: number): boolean {
@@ -406,40 +473,106 @@ export class TmuxBridge extends EventEmitter {
     return this.capturePane(CAPTURE_LINES, target)
   }
 
-  private computePaneRuntimeState(pane: PaneInfo): PaneRuntimeState {
+  private computePaneRuntimeState(pane: PaneInfo, listeningPids?: Set<number>): PaneRuntimeState {
     const claudeRunning =
       this.isClaudeCommand(pane.currentCommand) ||
       this.looksLikeClaudeVersion(pane.currentCommand) ||
       this.hasClaudeProcessInTree(pane.panePid)
     const shellReady = !claudeRunning && this.isShellCommand(pane.currentCommand)
 
+    // Claude and a listening dev server don't realistically share a pane
+    // (both want the foreground), so skip the lsof pass when Claude is up.
+    // Also lets the single-pane path use a fresh lsof lookup only when
+    // truly needed.
+    let serverRunning = false
+    let serverCommand: string | null = null
+    if (!claudeRunning) {
+      const pids = listeningPids ?? this.listListeningPids()
+      serverCommand = this.findServerShellCommand(pane.panePid, pids)
+      serverRunning = serverCommand !== null
+    }
+
     return {
       claudeRunning,
       shellReady,
-      currentCommand: pane.currentCommand
+      currentCommand: pane.currentCommand,
+      serverRunning,
+      serverCommand
+    }
+  }
+
+  private emptyRuntimeState(): PaneRuntimeState {
+    return {
+      claudeRunning: false,
+      shellReady: false,
+      currentCommand: '',
+      serverRunning: false,
+      serverCommand: null
     }
   }
 
   getPaneRuntimeState(target?: string): PaneRuntimeState {
-    if (!target) {
-      return { claudeRunning: false, shellReady: false, currentCommand: '' }
-    }
-
+    if (!target) return this.emptyRuntimeState()
     const pane = this.listPanes().find(p => p.target === target)
-    if (!pane) {
-      return { claudeRunning: false, shellReady: false, currentCommand: '' }
-    }
-
+    if (!pane) return this.emptyRuntimeState()
     return this.computePaneRuntimeState(pane)
   }
 
-  // Batch version used by periodic broadcast — one listPanes + one ps pass.
+  // Batch version used by periodic broadcast — one listPanes + one lsof + one ps pass.
   getAllPaneRuntimeStates(): Array<{ paneId: string; target: string } & PaneRuntimeState> {
+    const listeningPids = this.listListeningPids()
     return this.listPanes().map(pane => ({
       paneId: pane.id,
       target: pane.target,
-      ...this.computePaneRuntimeState(pane)
+      ...this.computePaneRuntimeState(pane, listeningPids)
     }))
+  }
+
+  // Ctrl-C the pane's foreground process. Detection catches up on the next
+  // runtime-state cycle and the UI flips back to the normal state.
+  stopServer(target: string): boolean {
+    if (!this.sessionExists() || !target) return false
+    try {
+      this.runTmux(['send-keys', '-t', target, 'C-c'])
+      return true
+    } catch (error) {
+      console.error('Failed to stop server:', error)
+      return false
+    }
+  }
+
+  // Capture the shell-level command BEFORE Ctrl-C — once the process is gone
+  // we can't look it up — then after a short beat re-type it at the prompt.
+  // C-u first flushes any half-typed input so the replayed command runs
+  // cleanly even if the user was mid-keystroke when they pressed Restart.
+  restartServer(target: string): boolean {
+    if (!this.sessionExists() || !target) return false
+    const pane = this.listPanes().find(p => p.target === target)
+    if (!pane) return false
+
+    const command = this.findServerShellCommand(pane.panePid, this.listListeningPids())
+    if (!command) {
+      console.error('No server command found to restart for pane', target)
+      return false
+    }
+
+    try {
+      this.runTmux(['send-keys', '-t', target, 'C-c'])
+    } catch (error) {
+      console.error('Failed to send C-c for restart:', error)
+      return false
+    }
+
+    setTimeout(() => {
+      try {
+        this.runTmux(['send-keys', '-t', target, 'C-u'])
+        this.runTmux(['send-keys', '-t', target, '-l', command])
+        this.runTmux(['send-keys', '-t', target, 'C-m'])
+      } catch (err) {
+        console.error('Failed to replay server command:', err)
+      }
+    }, 250)
+    return true
   }
 
   // Check if Claude Code is running in the pane's process tree.

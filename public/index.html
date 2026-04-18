@@ -927,6 +927,14 @@
         <i id="modeActionIcon" data-lucide="repeat"></i>
         <span id="modeActionLabel">Change mode</span>
       </button>
+      <button class="shortcut-btn" id="serverRestartBtn" onclick="handleServerRestart()" title="Restart Server" aria-label="Restart server" style="margin-left: auto; display: none;">
+        <i data-lucide="rotate-ccw"></i>
+        <span>Restart</span>
+      </button>
+      <button class="shortcut-btn" id="serverStopBtn" onclick="handleServerStop()" title="Stop Server" aria-label="Stop server" style="display: none;">
+        <i data-lucide="square"></i>
+        <span>Stop</span>
+      </button>
       <button class="commands-btn" id="commandsBtn" onclick="toggleCommandPalette()" title="Slash Commands" aria-label="Slash commands">/</button>
     </div>
     <!-- Command palette drawer -->
@@ -1122,6 +1130,8 @@
     const commandsBtn = document.getElementById('commandsBtn');
     const modeActionBtn = document.getElementById('modeActionBtn');
     const modeActionLabel = document.getElementById('modeActionLabel');
+    const serverStopBtn = document.getElementById('serverStopBtn');
+    const serverRestartBtn = document.getElementById('serverRestartBtn');
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
     // with an <svg>, so after state changes we restore the placeholder and let
@@ -1153,6 +1163,8 @@
         this.claudeRunning = false;
         this.shellReady = false;
         this.currentCommand = '';
+        this.serverRunning = false;
+        this.serverCommand = null;
         this.inputText = '';
         this.selectedLanguage = null;  // Set to languages[0] when restored
         this.allLines = [];
@@ -1425,6 +1437,12 @@
       if (typeof runtimeState.currentCommand === 'string') {
         state.currentCommand = runtimeState.currentCommand;
       }
+      if (typeof runtimeState.serverRunning === 'boolean') {
+        state.serverRunning = runtimeState.serverRunning;
+      }
+      if ('serverCommand' in runtimeState) {
+        state.serverCommand = runtimeState.serverCommand || null;
+      }
       if (paneId === activePaneId) {
         updateModeActionButton();
       }
@@ -1433,13 +1451,35 @@
     function updateModeActionButton() {
       const state = getActivePaneState();
       const claudeRunning = state?.claudeRunning === true;
+      const serverRunning = state?.serverRunning === true;
+      const serverCommand = state?.serverCommand || '';
 
       modeActionBtn.disabled = false;
       modeActionBtn.classList.remove('disabled');
 
+      if (serverRunning) {
+        // Server-control mode: hide mode-action and slash-commands, expose
+        // Stop + Restart. Tooltip surfaces the exact command we'd replay so
+        // the user can confirm before tapping Restart.
+        modeActionBtn.style.display = 'none';
+        commandsBtn.style.display = 'none';
+        serverRestartBtn.style.display = '';
+        serverStopBtn.style.display = '';
+        const stopTitle = serverCommand ? `Stop: ${serverCommand}` : 'Stop Server';
+        const restartTitle = serverCommand ? `Restart: ${serverCommand}` : 'Restart Server';
+        serverStopBtn.title = stopTitle;
+        serverStopBtn.setAttribute('aria-label', stopTitle);
+        serverRestartBtn.title = restartTitle;
+        serverRestartBtn.setAttribute('aria-label', restartTitle);
+        messageInput.placeholder = 'Type a command...';
+        return;
+      }
+
+      // Non-server state — restore the normal mode-action button.
+      modeActionBtn.style.display = '';
+      serverStopBtn.style.display = 'none';
+      serverRestartBtn.style.display = 'none';
       // Slash-commands only make sense once Claude is accepting input.
-      // Inline style overrides the class's `display: flex`, which the HTML
-      // hidden attribute alone can't.
       commandsBtn.style.display = claudeRunning ? '' : 'none';
 
       if (claudeRunning) {
@@ -1447,12 +1487,24 @@
         modeActionBtn.title = 'Switch Mode (Shift+Tab)';
         modeActionBtn.setAttribute('aria-label', 'Change mode');
         setModeActionIcon('repeat');
+        messageInput.placeholder = 'Message Claude...';
       } else {
         modeActionLabel.textContent = 'Start Claude';
         modeActionBtn.title = 'Start Claude Code';
         modeActionBtn.setAttribute('aria-label', 'Start Claude');
         setModeActionIcon('play');
+        messageInput.placeholder = 'Type a command...';
       }
+    }
+
+    function handleServerStop() {
+      if (!isSocketUsable()) return;
+      ws.send(JSON.stringify({ type: 'serverStop' }));
+    }
+
+    function handleServerRestart() {
+      if (!isSocketUsable()) return;
+      ws.send(JSON.stringify({ type: 'serverRestart' }));
     }
 
     function scheduleOutputUpdate(lines, mode, paneId) {

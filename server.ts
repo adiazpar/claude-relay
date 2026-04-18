@@ -373,6 +373,30 @@ wss.on('connection', (ws: WebSocket) => {
         }
       } else if (msg.type === 'typing') {
         tmuxBridge.setTypingState(msg.isTyping === true)
+      } else if (msg.type === 'serverStop') {
+        if (!paneTarget) {
+          ws.send(JSON.stringify({ type: 'serverAction', action: 'stop', success: false, error: 'No active pane target' }))
+          return
+        }
+        const success = tmuxBridge.stopServer(paneTarget)
+        ws.send(JSON.stringify({
+          type: 'serverAction',
+          action: 'stop',
+          success,
+          paneId: clientState?.activePane
+        }))
+      } else if (msg.type === 'serverRestart') {
+        if (!paneTarget) {
+          ws.send(JSON.stringify({ type: 'serverAction', action: 'restart', success: false, error: 'No active pane target' }))
+          return
+        }
+        const success = tmuxBridge.restartServer(paneTarget)
+        ws.send(JSON.stringify({
+          type: 'serverAction',
+          action: 'restart',
+          success,
+          paneId: clientState?.activePane
+        }))
       }
     } catch (error) {
       console.error('Error handling WS message:', error)
