@@ -508,6 +508,63 @@
     }
 
 
+    /* Shown in place of .input-row when a dev server is running in the
+       active pane. Each .port-chip opens http://<relay-host>:<port>. */
+    .server-ports-row {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 2px;
+      flex-wrap: wrap;
+      min-height: 44px;
+    }
+
+    .server-ports-row.empty {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      padding-left: 14px;
+    }
+
+    .port-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 36px;
+      padding: 0 14px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-family: 'Terminal Nerd Font', ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      text-decoration: none;
+    }
+
+    .port-chip svg {
+      width: 14px;
+      height: 14px;
+      color: var(--text-secondary);
+    }
+
+    @media (hover: hover) {
+      .port-chip:hover {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+        background: rgba(215, 118, 85, 0.08);
+      }
+      .port-chip:hover svg {
+        color: var(--accent-hover);
+      }
+    }
+
+    .port-chip:active {
+      transform: scale(0.97);
+    }
+
     /* Input row - this IS the styled input field */
     .input-row {
       display: flex;
@@ -945,8 +1002,10 @@
         </div>
       </div>
     </div>
+    <!-- Server ports row - swapped in for the input when a dev server is running -->
+    <div class="server-ports-row" id="serverPortsRow"></div>
     <!-- Input row -->
-    <div class="input-row">
+    <div class="input-row" id="inputRow">
       <textarea
         id="messageInput"
         placeholder="Message Claude..."
@@ -1132,6 +1191,8 @@
     const modeActionLabel = document.getElementById('modeActionLabel');
     const serverStopBtn = document.getElementById('serverStopBtn');
     const serverRestartBtn = document.getElementById('serverRestartBtn');
+    const serverPortsRow = document.getElementById('serverPortsRow');
+    const inputRow = document.getElementById('inputRow');
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
     // with an <svg>, so after state changes we restore the placeholder and let
@@ -1165,6 +1226,7 @@
         this.currentCommand = '';
         this.serverRunning = false;
         this.serverCommand = null;
+        this.serverPorts = [];
         this.inputText = '';
         this.selectedLanguage = null;  // Set to languages[0] when restored
         this.allLines = [];
@@ -1443,6 +1505,9 @@
       if ('serverCommand' in runtimeState) {
         state.serverCommand = runtimeState.serverCommand || null;
       }
+      if (Array.isArray(runtimeState.serverPorts)) {
+        state.serverPorts = runtimeState.serverPorts.slice();
+      }
       if (paneId === activePaneId) {
         updateModeActionButton();
       }
@@ -1458,9 +1523,11 @@
       modeActionBtn.classList.remove('disabled');
 
       if (serverRunning) {
-        // Server-control mode: hide mode-action and slash-commands, expose
-        // Stop + Restart. Tooltip surfaces the exact command we'd replay so
-        // the user can confirm before tapping Restart.
+        // Server-control mode: hide mode-action, slash-commands, and the
+        // chat input. Expose Stop + Restart plus a row of tappable port
+        // chips so the user can jump straight to whatever the server is
+        // serving — the chat input has no reliable purpose here (stdin
+        // goes to the server process, not a shell).
         modeActionBtn.style.display = 'none';
         commandsBtn.style.display = 'none';
         serverRestartBtn.style.display = '';
@@ -1471,14 +1538,20 @@
         serverStopBtn.setAttribute('aria-label', stopTitle);
         serverRestartBtn.title = restartTitle;
         serverRestartBtn.setAttribute('aria-label', restartTitle);
-        messageInput.placeholder = 'Type a command...';
+        inputRow.style.display = 'none';
+        serverPortsRow.style.display = 'flex';
+        renderServerPorts(state?.serverPorts || []);
+        if (typeof updateOutputPadding === 'function') updateOutputPadding();
         return;
       }
 
-      // Non-server state — restore the normal mode-action button.
+      // Non-server state — restore the normal mode-action button and chat input.
       modeActionBtn.style.display = '';
       serverStopBtn.style.display = 'none';
       serverRestartBtn.style.display = 'none';
+      serverPortsRow.style.display = 'none';
+      inputRow.style.display = '';
+      if (typeof updateOutputPadding === 'function') updateOutputPadding();
       // Slash-commands only make sense once Claude is accepting input.
       commandsBtn.style.display = claudeRunning ? '' : 'none';
 
@@ -1505,6 +1578,45 @@
     function handleServerRestart() {
       if (!isSocketUsable()) return;
       ws.send(JSON.stringify({ type: 'serverRestart' }));
+    }
+
+    // Render a tappable chip per detected listening port. The server probes
+    // each port's protocol once (TLS handshake -> https, plaintext response
+    // -> http) and ships the result with the port, so chips open with the
+    // right scheme regardless of whether the relay itself is HTTP or HTTPS
+    // and regardless of whether the dev server uses TLS. The hostname
+    // inherits from window.location so any access pattern (Tailscale, LAN,
+    // localhost, custom hostname) works without configuration.
+    function renderServerPorts(ports) {
+      serverPortsRow.classList.remove('empty');
+      serverPortsRow.replaceChildren();
+      if (!ports || ports.length === 0) {
+        serverPortsRow.classList.add('empty');
+        serverPortsRow.textContent = 'Waiting for port...';
+        return;
+      }
+      const host = window.location.hostname;
+      for (const entry of ports) {
+        const port = typeof entry === 'number' ? entry : entry?.port;
+        const protocol = (typeof entry === 'object' && entry?.protocol === 'https') ? 'https:' : 'http:';
+        if (!port) continue;
+        const url = `${protocol}//${host}:${port}`;
+        const chip = document.createElement('a');
+        chip.className = 'port-chip';
+        chip.href = url;
+        chip.target = '_blank';
+        chip.rel = 'noopener noreferrer';
+        chip.title = url;
+        chip.setAttribute('aria-label', `Open ${url}`);
+        const label = document.createElement('span');
+        label.textContent = String(port);
+        const icon = document.createElement('i');
+        icon.setAttribute('data-lucide', 'external-link');
+        chip.appendChild(label);
+        chip.appendChild(icon);
+        serverPortsRow.appendChild(chip);
+      }
+      if (window.lucide) lucide.createIcons();
     }
 
     function scheduleOutputUpdate(lines, mode, paneId) {

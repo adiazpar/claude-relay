@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
+import * as tls from 'tls'
 
 const TMUX_SESSION = process.env.TMUX_SESSION || 'dev'
 const DEFAULT_CWD = process.env.HOME || '/'
@@ -23,12 +24,18 @@ export interface PaneInfo {
   height: number
 }
 
+export interface ServerPort {
+  port: number
+  protocol: 'http' | 'https'
+}
+
 export interface PaneRuntimeState {
   claudeRunning: boolean
   shellReady: boolean
   currentCommand: string
   serverRunning: boolean
   serverCommand: string | null
+  serverPorts: ServerPort[]
 }
 
 export class TmuxBridge extends EventEmitter {
@@ -36,6 +43,11 @@ export class TmuxBridge extends EventEmitter {
   private polling = false
   private pollTimer: NodeJS.Timeout | null = null
   private cachedPanes: PaneInfo[] = []
+  // Cached protocol per listening port. Populated asynchronously by
+  // probePort; evicted when the port disappears from the lsof listing so
+  // a new process reusing the same port gets re-probed.
+  private protocolCache = new Map<number, 'http' | 'https'>()
+  private pendingProbes = new Set<number>()
 
   constructor() {
     super()
@@ -94,43 +106,145 @@ export class TmuxBridge extends EventEmitter {
     return /(^|\/)(bash|zsh|sh|fish|ksh|tcsh|csh|dash|nu)$/.test(normalized)
   }
 
-  // All PIDs currently listening on a TCP socket, system-wide. One lsof
-  // call per detection cycle is cheaper than per-pane queries, and the
-  // caller intersects this against each pane's own process tree — so a
-  // backend server in pane A and a frontend server in pane B never cross
-  // streams.
-  private listListeningPids(): Set<number> {
+  // All PIDs currently listening on a TCP socket, mapped to the ports they
+  // bind. One lsof call per detection cycle is cheaper than per-pane
+  // queries, and the caller intersects this against each pane's own
+  // process tree — so a backend server in pane A and a frontend server in
+  // pane B never cross streams.
+  private listListeningByPid(): Map<number, number[]> {
     try {
-      const output = execFileSync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fp'], {
+      // -FpPn emits one field per line: p<pid>, P<proto>, n<addr:port>.
+      // Each process block starts with p<pid>; subsequent n lines belong
+      // to that pid until the next p line.
+      const output = execFileSync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-FpPn'], {
         encoding: 'utf-8',
         maxBuffer: MAX_BUFFER,
         stdio: ['ignore', 'pipe', 'pipe']
       })
-      const pids = new Set<number>()
+      const byPid = new Map<number, Set<number>>()
+      let currentPid = 0
       for (const line of output.split('\n')) {
-        if (line.startsWith('p')) {
-          const pid = parseInt(line.slice(1), 10)
-          if (Number.isInteger(pid) && pid > 0) pids.add(pid)
+        if (!line) continue
+        const field = line[0]
+        const val = line.slice(1)
+        if (field === 'p') {
+          const pid = parseInt(val, 10)
+          currentPid = Number.isInteger(pid) && pid > 0 ? pid : 0
+        } else if (field === 'n' && currentPid) {
+          // Address formats: *:3000, 127.0.0.1:3000, [::1]:3000, *:*
+          const m = val.match(/:(\d+)$/)
+          if (m) {
+            const port = parseInt(m[1], 10)
+            if (Number.isInteger(port) && port > 0 && port <= 65535) {
+              if (!byPid.has(currentPid)) byPid.set(currentPid, new Set())
+              byPid.get(currentPid)!.add(port)
+            }
+          }
         }
       }
-      return pids
+      const result = new Map<number, number[]>()
+      for (const [pid, ports] of byPid) {
+        result.set(pid, [...ports].sort((a, b) => a - b))
+      }
+      return result
     } catch {
       // lsof missing or blocked — server detection is a best-effort signal,
       // treat it as "no servers visible" and fall through to normal UI.
-      return new Set()
+      return new Map()
     }
   }
 
-  // Given a pane's shell pid and the global set of listening pids, find the
-  // shell-level command the user typed to start a server. Walks each direct
-  // child of the shell; if any descendant of that child is a listener, the
-  // child's own argv is the shell-level command. This preserves the user's
-  // intent for wrapped invocations (`npm run dev` → node listens, but we
-  // return `npm run dev`) while still giving the exact string for direct
-  // invocations (`python3 manage.py runserver` IS the listener).
-  private findServerShellCommand(panePid: number, listeningPids: Set<number>): string | null {
+  // Speak TLS to 127.0.0.1:<port> just far enough to see whether the server
+  // returns a real ServerHello. A clean TLS handshake => https. An error
+  // other than ECONNREFUSED/unreachable means the server responded with
+  // non-TLS bytes (or closed) => it's speaking plain http. Connection
+  // refused or timeouts yield null so we don't cache a guess during boot.
+  private probePort(port: number): Promise<'http' | 'https' | null> {
+    return new Promise(resolve => {
+      let settled = false
+      const done = (r: 'http' | 'https' | null) => {
+        if (settled) return
+        settled = true
+        resolve(r)
+      }
+      let socket: tls.TLSSocket
+      try {
+        socket = tls.connect({
+          host: '127.0.0.1',
+          port,
+          rejectUnauthorized: false,
+          servername: 'localhost',
+          timeout: 1000
+        })
+      } catch {
+        return done(null)
+      }
+      socket.once('secureConnect', () => {
+        done('https')
+        try { socket.destroy() } catch {}
+      })
+      socket.once('error', (err: NodeJS.ErrnoException) => {
+        const code = err?.code
+        if (code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
+          done(null)
+        } else {
+          // TLS handshake failed mid-way — the server is speaking plaintext.
+          done('http')
+        }
+        try { socket.destroy() } catch {}
+      })
+      socket.once('timeout', () => {
+        done(null)
+        try { socket.destroy() } catch {}
+      })
+    })
+  }
+
+  // Return the cached protocol for a port. If we've never probed it, kick
+  // off a background probe and return 'http' as a placeholder. When the
+  // probe comes back as 'https' we emit protocolResolved so the server can
+  // push an early broadcast — without that, clients would show the wrong
+  // scheme for up to one full runtime-state cycle (~2s) after a server
+  // boots. 'http' results don't need an early broadcast because that's
+  // the default clients already saw.
+  private getPortProtocol(port: number): 'http' | 'https' {
+    const cached = this.protocolCache.get(port)
+    if (cached) return cached
+    if (!this.pendingProbes.has(port)) {
+      this.pendingProbes.add(port)
+      this.probePort(port).then(result => {
+        this.pendingProbes.delete(port)
+        if (!result) return
+        const prev = this.protocolCache.get(port)
+        this.protocolCache.set(port, result)
+        if (prev !== result && result === 'https') {
+          this.emit('protocolResolved', port, result)
+        }
+      }).catch(() => {
+        this.pendingProbes.delete(port)
+      })
+    }
+    return 'http'
+  }
+
+  private gcProtocolCache(activePorts: Set<number>): void {
+    for (const port of this.protocolCache.keys()) {
+      if (!activePorts.has(port)) this.protocolCache.delete(port)
+    }
+  }
+
+  // Given a pane's shell pid and the global listening-PID map, find the
+  // shell-level command the user typed AND the ports its subtree is bound
+  // to. Walks each direct child of the shell; if any descendant of that
+  // child is a listener, the child's own argv is the shell-level command.
+  // Preserves the user's intent for wrapped invocations (`npm run dev` →
+  // node listens, but we return `npm run dev`) while giving the exact
+  // string for direct invocations (`python3 manage.py runserver`). All
+  // listening ports within the matched subtree are collected so the UI
+  // can show quick-launch chips (Vite's HTTP port plus its HMR port, etc.).
+  private detectServer(panePid: number, listeningByPid: Map<number, number[]>): { command: string; ports: ServerPort[] } | null {
     if (!Number.isInteger(panePid) || panePid <= 0) return null
-    if (listeningPids.size === 0) return null
+    if (listeningByPid.size === 0) return null
 
     const processes = this.listProcesses()
     if (processes.length === 0) return null
@@ -145,15 +259,22 @@ export class TmuxBridge extends EventEmitter {
     for (const child of directChildren) {
       const stack = [child.pid]
       const seen = new Set<number>()
+      const ports = new Set<number>()
       while (stack.length > 0) {
         const pid = stack.pop()!
         if (seen.has(pid)) continue
         seen.add(pid)
-        if (listeningPids.has(pid)) {
-          return child.command.trim()
-        }
+        const pidPorts = listeningByPid.get(pid)
+        if (pidPorts) for (const port of pidPorts) ports.add(port)
         const kids = byParent.get(pid) || []
         for (const k of kids) stack.push(k.pid)
+      }
+      if (ports.size > 0) {
+        const sorted = [...ports].sort((a, b) => a - b)
+        return {
+          command: child.command.trim(),
+          ports: sorted.map(port => ({ port, protocol: this.getPortProtocol(port) }))
+        }
       }
     }
     return null
@@ -473,7 +594,7 @@ export class TmuxBridge extends EventEmitter {
     return this.capturePane(CAPTURE_LINES, target)
   }
 
-  private computePaneRuntimeState(pane: PaneInfo, listeningPids?: Set<number>): PaneRuntimeState {
+  private computePaneRuntimeState(pane: PaneInfo, listeningByPid?: Map<number, number[]>): PaneRuntimeState {
     const claudeRunning =
       this.isClaudeCommand(pane.currentCommand) ||
       this.looksLikeClaudeVersion(pane.currentCommand) ||
@@ -482,14 +603,17 @@ export class TmuxBridge extends EventEmitter {
 
     // Claude and a listening dev server don't realistically share a pane
     // (both want the foreground), so skip the lsof pass when Claude is up.
-    // Also lets the single-pane path use a fresh lsof lookup only when
-    // truly needed.
     let serverRunning = false
     let serverCommand: string | null = null
+    let serverPorts: ServerPort[] = []
     if (!claudeRunning) {
-      const pids = listeningPids ?? this.listListeningPids()
-      serverCommand = this.findServerShellCommand(pane.panePid, pids)
-      serverRunning = serverCommand !== null
+      const map = listeningByPid ?? this.listListeningByPid()
+      const detected = this.detectServer(pane.panePid, map)
+      if (detected) {
+        serverRunning = true
+        serverCommand = detected.command
+        serverPorts = detected.ports
+      }
     }
 
     return {
@@ -497,7 +621,8 @@ export class TmuxBridge extends EventEmitter {
       shellReady,
       currentCommand: pane.currentCommand,
       serverRunning,
-      serverCommand
+      serverCommand,
+      serverPorts
     }
   }
 
@@ -507,7 +632,8 @@ export class TmuxBridge extends EventEmitter {
       shellReady: false,
       currentCommand: '',
       serverRunning: false,
-      serverCommand: null
+      serverCommand: null,
+      serverPorts: []
     }
   }
 
@@ -520,11 +646,19 @@ export class TmuxBridge extends EventEmitter {
 
   // Batch version used by periodic broadcast — one listPanes + one lsof + one ps pass.
   getAllPaneRuntimeStates(): Array<{ paneId: string; target: string } & PaneRuntimeState> {
-    const listeningPids = this.listListeningPids()
+    const listeningByPid = this.listListeningByPid()
+    // Evict protocol cache entries whose ports are no longer listening, so
+    // a new process reusing the same port gets re-probed rather than
+    // inheriting the old process's classification.
+    const activePorts = new Set<number>()
+    for (const ports of listeningByPid.values()) {
+      for (const p of ports) activePorts.add(p)
+    }
+    this.gcProtocolCache(activePorts)
     return this.listPanes().map(pane => ({
       paneId: pane.id,
       target: pane.target,
-      ...this.computePaneRuntimeState(pane, listeningPids)
+      ...this.computePaneRuntimeState(pane, listeningByPid)
     }))
   }
 
@@ -550,11 +684,12 @@ export class TmuxBridge extends EventEmitter {
     const pane = this.listPanes().find(p => p.target === target)
     if (!pane) return false
 
-    const command = this.findServerShellCommand(pane.panePid, this.listListeningPids())
-    if (!command) {
+    const detected = this.detectServer(pane.panePid, this.listListeningByPid())
+    if (!detected) {
       console.error('No server command found to restart for pane', target)
       return false
     }
+    const command = detected.command
 
     try {
       this.runTmux(['send-keys', '-t', target, 'C-c'])

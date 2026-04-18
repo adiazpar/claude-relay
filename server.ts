@@ -448,6 +448,30 @@ setInterval(() => {
 
 // Broadcast per-pane runtime state to all clients so every tab's button can
 // reflect current claudeRunning/shellReady regardless of which pane is active.
+function broadcastRuntimeStates() {
+  if (wss.clients.size === 0) return
+  const states = tmuxBridge.getAllPaneRuntimeStates()
+  const payload = JSON.stringify({ type: 'paneRuntimeList', states })
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(payload) } catch {}
+    }
+  })
+}
+
+// An async TLS probe that upgrades a newly-seen port from the default http
+// guess to https fires this event. Debounce so a cluster of near-simultaneous
+// probes only triggers one extra broadcast, and so we don't race the next
+// scheduled 2s tick.
+let earlyBroadcastTimer: NodeJS.Timeout | null = null
+tmuxBridge.on('protocolResolved', () => {
+  if (earlyBroadcastTimer) return
+  earlyBroadcastTimer = setTimeout(() => {
+    earlyBroadcastTimer = null
+    broadcastRuntimeStates()
+  }, 80)
+})
+
 const PANE_STATE_BROADCAST_MS = 2000
 setInterval(() => {
   if (wss.clients.size === 0) return
