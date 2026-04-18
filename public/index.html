@@ -1405,22 +1405,68 @@
     const RECONNECT_MIN = 500;
     const RECONNECT_MAX = 30000;
     let reconnectTimer = null;
+    let isIntentionalSocketClose = false;
+    let resumeSyncTimer = null;
+    let lastResumeSyncAt = 0;
+
+    function isSocketUsable() {
+      return !!ws && ws.readyState === WebSocket.OPEN;
+    }
+
+    function closeSocket(intentional = false) {
+      if (!ws) return;
+      const socket = ws;
+      ws = null;
+      if (intentional) isIntentionalSocketClose = true;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = () => {
+        if (intentional) {
+          isIntentionalSocketClose = false;
+        }
+      };
+      try { socket.close(); } catch {}
+    }
+
+    function syncSocketSession() {
+      if (!isSocketUsable()) return;
+      if (activePaneId) {
+        ws.send(JSON.stringify({ type: 'switchPane', paneId: activePaneId }));
+      } else {
+        ws.send(JSON.stringify({ type: 'refresh' }));
+      }
+      sendResize();
+    }
 
     function connect() {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (isSocketUsable()) return;
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${window.location.host}`);
+      const socket = new WebSocket(`${protocol}//${window.location.host}`);
+      ws = socket;
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (ws !== socket) {
+          try { socket.close(); } catch {}
+          return;
+        }
         connected = true;
         reconnectDelay = RECONNECT_MIN;
         lastRxTime = Date.now();
         updateStatus();
-        sendResize();
+        syncSocketSession();
       };
 
-      ws.onclose = () => {
+      socket.onclose = () => {
+        if (ws === socket) {
+          ws = null;
+        }
+        if (isIntentionalSocketClose) {
+          isIntentionalSocketClose = false;
+          return;
+        }
         connected = false;
         updateStatus();
         // Exponential backoff with cap — avoids hammering the server on outage.
@@ -1428,11 +1474,12 @@
         reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
       };
 
-      ws.onerror = (error) => {
+      socket.onerror = (error) => {
         console.error('WebSocket error:', error);
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
+        if (ws !== socket) return;
         lastRxTime = Date.now();
         let msg;
         try {
@@ -1859,12 +1906,22 @@
       });
 
       // Request output for this pane via WebSocket
-      if (ws && connected) {
+      if (isSocketUsable()) {
         ws.send(JSON.stringify({ type: 'switchPane', paneId }));
-        // Force resize the new window to match phone width
-        lastCols = 0; // Reset so sendResize() will send
-        sendResize();
+      } else if (pane.target) {
+        fetch(`/api/output?target=${encodeURIComponent(pane.target)}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data.output) {
+              applyLinesUpdate(data.output.split('\n'), null, paneId);
+            }
+          })
+          .catch(error => console.error('Failed to fetch pane output:', error));
       }
+
+      // Force resize the new window to match phone width
+      lastCols = 0; // Reset so sendResize() will send
+      sendResize();
 
       // Fetch commands for this pane's cwd
       fetchCommands(pane.cwd);
@@ -1947,20 +2004,57 @@
 
     function sendMessage() {
       const message = messageInput.value.trim();
-      if (!message || !connected) return;
+      if (!message) return;
 
       // Optimistic UI: clear input immediately
       messageInput.value = '';
       messageInput.style.height = 'auto';
       updateButtonState();
 
-      ws.send(JSON.stringify({ type: 'send', content: message }));
+      if (isSocketUsable()) {
+        ws.send(JSON.stringify({ type: 'send', content: message }));
+        return;
+      }
+
+      fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, target: activePaneTarget })
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (!data.success) {
+            console.error('Failed to send message');
+          }
+          scheduleResumeSync('sendMessage');
+        })
+        .catch(error => {
+          console.error('Failed to send message via REST:', error);
+        });
     }
 
 
     function sendKey(key) {
-      if (!connected) return;
-      ws.send(JSON.stringify({ type: 'key', key: key }));
+      if (isSocketUsable()) {
+        ws.send(JSON.stringify({ type: 'key', key: key }));
+        return;
+      }
+
+      fetch('/api/key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, target: activePaneTarget })
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (!data.success) {
+            console.error('Failed to send key');
+          }
+          scheduleResumeSync('sendKey');
+        })
+        .catch(error => {
+          console.error('Failed to send key via REST:', error);
+        });
     }
 
     // ============================================
@@ -2247,41 +2341,34 @@
     // The server sends a ping every 15s; any message (ping or real) refreshes
     // lastRxTime. If we haven't heard from the server recently, assume the
     // socket is dead and force a reconnect.
-    const FRESHNESS_THRESHOLD_MS = 20000; // no message in 20s -> assume dead
-    const WATCHDOG_INTERVAL_MS = 5000;
+    function scheduleResumeSync(reason) {
+      const now = Date.now();
+      if (now - lastResumeSyncAt < 250) return;
+      lastResumeSyncAt = now;
 
-    function forceReconnect() {
-      if (ws) {
-        ws.onclose = null;
-        ws.onmessage = null;
-        ws.onerror = null;
-        try { ws.close(); } catch {}
-        ws = null;
-      }
-      connected = false;
-      updateStatus();
-      reconnectDelay = RECONNECT_MIN;
-      initializeFromREST();
-      connect();
-    }
-
-    function recoverIfStale() {
-      const stale = Date.now() - lastRxTime > FRESHNESS_THRESHOLD_MS;
-      const noSocket = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
-      if (stale || noSocket) forceReconnect();
+      if (resumeSyncTimer) clearTimeout(resumeSyncTimer);
+      resumeSyncTimer = setTimeout(() => {
+        reconnectDelay = RECONNECT_MIN;
+        closeSocket(true);
+        initializeFromREST().finally(() => {
+          connected = true;
+          updateStatus();
+          connect();
+        });
+      }, 0);
     }
 
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') recoverIfStale();
+      if (document.visibilityState === 'visible') {
+        scheduleResumeSync('visibilitychange');
+      } else {
+        closeSocket(true);
+      }
     });
-    window.addEventListener('pageshow', () => recoverIfStale());
-    window.addEventListener('focus', () => recoverIfStale());
-    window.addEventListener('online', () => recoverIfStale());
-
-    // Background watchdog: catches zombie sockets even without visibility events
-    setInterval(() => {
-      if (document.visibilityState === 'visible') recoverIfStale();
-    }, WATCHDOG_INTERVAL_MS);
+    window.addEventListener('pageshow', () => scheduleResumeSync('pageshow'));
+    window.addEventListener('focus', () => scheduleResumeSync('focus'));
+    window.addEventListener('online', () => scheduleResumeSync('online'));
+    window.addEventListener('pagehide', () => closeSocket(true));
 
     // ============================================
     // iOS SCROLL FIXES
@@ -2464,9 +2551,6 @@
           }
         }
 
-        // Mark as connected once REST succeeds
-        connected = true;
-        updateStatus();
       } catch (e) {
         console.error('REST init failed:', e);
       }

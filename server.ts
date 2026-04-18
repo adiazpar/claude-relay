@@ -154,7 +154,20 @@ app.post('/api/send', (req, res) => {
     return res.status(413).json({ error: 'Message too large' })
   }
 
-  const success = tmuxBridge.sendMessage(message)
+  const target = validatePaneTarget(req.body?.target) ?? undefined
+  const success = tmuxBridge.sendMessage(message, target)
+  res.json({ success })
+})
+
+// Send a whitelisted key via REST (fallback)
+app.post('/api/key', (req, res) => {
+  const key = req.body?.key
+  if (typeof key !== 'string' || key.length === 0) {
+    return res.status(400).json({ error: 'Key required' })
+  }
+
+  const target = validatePaneTarget(req.body?.target) ?? undefined
+  const success = tmuxBridge.sendKey(key, target)
   res.json({ success })
 })
 
