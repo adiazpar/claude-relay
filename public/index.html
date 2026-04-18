@@ -989,9 +989,9 @@
 
     // localStorage wrapper that swallows quota/private-mode errors instead of crashing.
     const storage = {
-      get(key) { try { return storage.get(key); } catch { return null; } },
-      set(key, val) { try { storage.set(key, val); } catch (e) { console.warn('localStorage set failed:', e); } },
-      remove(key) { try { storage.remove(key); } catch {} }
+      get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+      set(key, val) { try { localStorage.setItem(key, val); } catch (e) { console.warn('localStorage set failed:', e); } },
+      remove(key) { try { localStorage.removeItem(key); } catch {} }
     };
 
     // ANSI to HTML converter - handles 256 colors and common codes
@@ -1401,6 +1401,9 @@
 
       modeActionBtn.disabled = false;
       modeActionBtn.classList.remove('disabled');
+
+      // Slash-commands only make sense once Claude is accepting input.
+      commandsBtn.hidden = !claudeRunning;
 
       if (claudeRunning) {
         modeActionLabel.textContent = 'Change mode';
@@ -1943,10 +1946,14 @@
     // Create a new window
     async function createNewWindow() {
       try {
+        // Send our column count so the new pane is sized correctly before the
+        // shell paints its first prompt — otherwise tmux creates the window at
+        // its default width and the first prompt's ruler line wraps visibly.
+        const cols = calculateColumns();
         const res = await fetch('/api/panes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
+          body: JSON.stringify({ cols })
         });
         const data = await res.json();
 
@@ -2124,8 +2131,18 @@
       if (!target) return;
 
       await sendTerminalCommand('clear', target);
-      await sendTerminalCommand('clear', target);
       await sendTerminalCommand('claude --dangerously-skip-permissions', target);
+
+      // Give Claude's TUI a moment to paint, then drop the command echoes
+      // that preceded it from tmux scrollback so the canvas shows only the
+      // Claude UI instead of "> claude --dangerously-skip-permissions" first.
+      setTimeout(() => {
+        fetch('/api/clear-history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target })
+        }).catch(() => {});
+      }, 1500);
     }
 
     function handleModeAction() {

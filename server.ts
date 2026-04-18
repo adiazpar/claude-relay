@@ -38,6 +38,13 @@ function validatePaneTarget(target: unknown): string | null {
   return panes.some(p => p.target === target) ? target : null
 }
 
+function validateDimension(value: unknown, min: number, max: number): number | undefined {
+  const n = typeof value === 'number' ? value : parseInt(String(value), 10)
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return undefined
+  if (n < min || n > max) return undefined
+  return n
+}
+
 // Only allow absolute, reasonably-short paths (no nulls). tmux will reject nonexistent dirs itself.
 function validateCwd(cwd: unknown): string | null {
   if (typeof cwd !== 'string') return null
@@ -116,7 +123,9 @@ app.get('/api/panes', (req, res) => {
 // Create a new window
 app.post('/api/panes', (req, res) => {
   const cwd = validateCwd(req.body?.cwd) ?? undefined
-  const newPane = tmuxBridge.createWindow(cwd)
+  const cols = validateDimension(req.body?.cols, 40, 300)
+  const rows = validateDimension(req.body?.rows, 10, 100)
+  const newPane = tmuxBridge.createWindow(cwd, cols, rows)
   if (newPane) {
     res.json({
       success: true,
@@ -153,6 +162,17 @@ app.get('/api/commands', async (req, res) => {
     console.error('Error fetching commands:', error)
     res.status(500).json({ error: 'Failed to fetch commands' })
   }
+})
+
+// Drop tmux scrollback for a pane (used after launching Claude so the pre-TUI
+// command echoes don't sit above Claude's UI in the canvas).
+app.post('/api/clear-history', (req, res) => {
+  const target = validatePaneTarget(req.body?.target)
+  if (!target) {
+    return res.status(400).json({ success: false, error: 'Valid target required' })
+  }
+  const success = tmuxBridge.clearHistory(target)
+  res.json({ success })
 })
 
 // Send message via REST (fallback)

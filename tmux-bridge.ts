@@ -183,8 +183,12 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Create a new window in the session
-  createWindow(cwd = DEFAULT_CWD): PaneInfo | null {
+  // Create a new window in the session. If cols/rows are supplied, the new
+  // window is sized before the shell paints its first prompt, so the initial
+  // prompt doesn't end up wrapped at tmux's default (wider) width. Scrollback
+  // is cleared afterwards to drop any mis-wrapped scrap that slipped in
+  // before the resize landed.
+  createWindow(cwd = DEFAULT_CWD, cols?: number, rows?: number): PaneInfo | null {
     if (!this.sessionExists()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return null
@@ -195,8 +199,26 @@ export class TmuxBridge extends EventEmitter {
       const nextIndex = panes.length > 0
         ? Math.max(...panes.map(pane => pane.windowIndex)) + 1
         : 0
-      const args = ['new-window', '-t', `${TMUX_SESSION}:${nextIndex}`, '-c', cwd]
-      this.runTmux(args)
+      const target = `${TMUX_SESSION}:${nextIndex}`
+      this.runTmux(['new-window', '-t', target, '-c', cwd])
+
+      if (cols !== undefined) {
+        try {
+          this.runTmux(['set-window-option', '-t', target, 'window-size', 'manual'])
+        } catch {
+          // Older tmux may not support window-size manual; continue anyway.
+        }
+        const safeCols = Math.max(40, Math.min(300, Math.floor(cols)))
+        const args = ['resize-window', '-t', target, '-x', String(safeCols)]
+        if (rows !== undefined) {
+          const safeRows = Math.max(10, Math.min(100, Math.floor(rows)))
+          args.push('-y', String(safeRows))
+        }
+        try { this.runTmux(args) } catch (err) {
+          console.error('Failed to resize new window:', err)
+        }
+        try { this.runTmux(['clear-history', '-t', target]) } catch {}
+      }
 
       // Get the updated pane list and return the new rightmost window
       const updatedPanes = this.listPanes()
@@ -204,6 +226,17 @@ export class TmuxBridge extends EventEmitter {
     } catch (error) {
       console.error('Failed to create window:', error)
       return null
+    }
+  }
+
+  clearHistory(target: string): boolean {
+    if (!this.sessionExists()) return false
+    try {
+      this.runTmux(['clear-history', '-t', target])
+      return true
+    } catch (error) {
+      console.error('Failed to clear history:', error)
+      return false
     }
   }
 
@@ -235,6 +268,24 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
+      // Typing `clear` at a shell prompt should yield a visually clean canvas
+      // — not an echoed "clear" line above a fresh prompt. Translate it to
+      // Ctrl-L (clears the screen without echoing a command) plus
+      // clear-history (drops scrollback). Skip the translation when Claude is
+      // running so "clear" still reaches Claude's own input.
+      if (message.trim() === 'clear') {
+        try {
+          const cmd = this.runTmux(['display-message', '-t', target, '-p', '#{pane_current_command}']).trim()
+          if (this.isShellCommand(cmd)) {
+            this.runTmux(['send-keys', '-t', target, 'C-l'])
+            this.runTmux(['clear-history', '-t', target])
+            return true
+          }
+        } catch {
+          // Fall through to the normal send path on any tmux error.
+        }
+      }
+
       // -l sends literal keys; argv form means no shell quoting needed
       this.runTmux(['send-keys', '-t', target, '-l', message])
       // C-m is the canonical tmux spelling of carriage return
