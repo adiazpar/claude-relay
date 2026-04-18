@@ -116,6 +116,11 @@ async function parseSkillFile(filePath: string, skillName: string): Promise<Comm
   }
 }
 
+// Reject directory/file names that try to smuggle path separators.
+function isSafeEntryName(name: string): boolean {
+  return name.length > 0 && name.length <= 255 && !name.includes('/') && !name.includes('\\') && !name.includes('\0')
+}
+
 /**
  * Scan a directory for skill subdirectories with SKILL.md files
  */
@@ -126,12 +131,11 @@ async function scanSkillDirectory(dirPath: string): Promise<Command[]> {
     const entries = await fs.readdir(dirPath, { withFileTypes: true })
 
     for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const skillPath = path.join(dirPath, entry.name, 'SKILL.md')
-        const command = await parseSkillFile(skillPath, entry.name)
-        if (command) {
-          commands.push(command)
-        }
+      if (!entry.isDirectory() || !isSafeEntryName(entry.name)) continue
+      const skillPath = path.join(dirPath, entry.name, 'SKILL.md')
+      const command = await parseSkillFile(skillPath, entry.name)
+      if (command) {
+        commands.push(command)
       }
     }
   } catch {
@@ -151,7 +155,7 @@ async function scanLegacyCommands(dirPath: string): Promise<Command[]> {
     const entries = await fs.readdir(dirPath, { withFileTypes: true })
 
     for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.md')) {
+      if (entry.isFile() && entry.name.endsWith('.md') && isSafeEntryName(entry.name)) {
         const name = entry.name.replace(/\.md$/, '')
         const filePath = path.join(dirPath, entry.name)
 
@@ -190,11 +194,10 @@ async function scanPluginSkills(pluginsDir: string): Promise<Command[]> {
     const plugins = await fs.readdir(pluginsDir, { withFileTypes: true })
 
     for (const plugin of plugins) {
-      if (plugin.isDirectory()) {
-        const skillsDir = path.join(pluginsDir, plugin.name, 'skills')
-        const pluginCommands = await scanSkillDirectory(skillsDir)
-        commands.push(...pluginCommands)
-      }
+      if (!plugin.isDirectory() || !isSafeEntryName(plugin.name)) continue
+      const skillsDir = path.join(pluginsDir, plugin.name, 'skills')
+      const pluginCommands = await scanSkillDirectory(skillsDir)
+      commands.push(...pluginCommands)
     }
   } catch {
     // Plugins directory doesn't exist - that's fine

@@ -11,6 +11,11 @@ import { getAllCommands } from './commands.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
+// Max inbound WebSocket message size (bytes)
+const MAX_WS_MESSAGE_BYTES = 64 * 1024
+// Max inbound message content length (characters)
+const MAX_MESSAGE_CONTENT_CHARS = 16 * 1024
+
 // SSL certificate paths - check both project root and dist parent
 const certsInCurrentDir = path.join(__dirname, 'certs')
 const certsInParentDir = path.join(__dirname, '..', 'certs')
@@ -24,6 +29,22 @@ const sslAvailable = existsSync(certPath) && existsSync(keyPath)
 function toLines(text: string): string[] {
   if (!text) return []
   return text.split('\n')
+}
+
+// Accept only values that match a currently-known pane target. Returns null if invalid.
+function validatePaneTarget(target: unknown): string | null {
+  if (typeof target !== 'string' || target.length === 0 || target.length > 128) return null
+  const panes = tmuxBridge.listPanes()
+  return panes.some(p => p.target === target) ? target : null
+}
+
+// Only allow absolute, reasonably-short paths (no nulls). tmux will reject nonexistent dirs itself.
+function validateCwd(cwd: unknown): string | null {
+  if (typeof cwd !== 'string') return null
+  if (cwd.length === 0 || cwd.length > 4096) return null
+  if (cwd.includes('\0')) return null
+  if (!path.isAbsolute(cwd)) return null
+  return cwd
 }
 
 const app = express()
@@ -40,13 +61,16 @@ const httpsServer = sslAvailable
   : null
 
 // WebSocket server - attach to HTTPS if available, otherwise HTTP
-const wss = new WebSocketServer({ server: httpsServer || httpServer })
+const wss = new WebSocketServer({
+  server: httpsServer || httpServer,
+  maxPayload: MAX_WS_MESSAGE_BYTES
+})
 
 const HOST = process.env.HOST || '0.0.0.0' // Listen on all interfaces for Tailscale
 
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')))
-app.use(express.json())
+app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -70,7 +94,8 @@ app.get('/cert', (req, res) => {
 
 // Get current pane content
 app.get('/api/output', (req, res) => {
-  const target = req.query.target as string | undefined
+  const rawTarget = req.query.target as string | undefined
+  const target = rawTarget ? validatePaneTarget(rawTarget) ?? undefined : undefined
   const output = tmuxBridge.getFullOutput(target)
   res.json({ output })
 })
@@ -83,7 +108,7 @@ app.get('/api/panes', (req, res) => {
 
 // Create a new window
 app.post('/api/panes', (req, res) => {
-  const { cwd } = req.body
+  const cwd = validateCwd(req.body?.cwd) ?? undefined
   const newPane = tmuxBridge.createWindow(cwd)
   if (newPane) {
     res.json({ success: true, pane: newPane, panes: tmuxBridge.listPanes() })
@@ -94,9 +119,9 @@ app.post('/api/panes', (req, res) => {
 
 // Close a window
 app.post('/api/panes/close', (req, res) => {
-  const { target } = req.body
+  const target = validatePaneTarget(req.body?.target)
   if (!target) {
-    return res.status(400).json({ success: false, error: 'Target required' })
+    return res.status(400).json({ success: false, error: 'Valid target required' })
   }
   const success = tmuxBridge.closeWindow(target)
   if (success) {
@@ -109,7 +134,8 @@ app.post('/api/panes/close', (req, res) => {
 // Get available slash commands
 app.get('/api/commands', async (req, res) => {
   try {
-    const cwd = req.query.cwd as string | undefined
+    const rawCwd = req.query.cwd as string | undefined
+    const cwd = rawCwd ? validateCwd(rawCwd) ?? undefined : undefined
     const commands = await getAllCommands(cwd)
     res.json({ commands })
   } catch (error) {
@@ -120,9 +146,12 @@ app.get('/api/commands', async (req, res) => {
 
 // Send message via REST (fallback)
 app.post('/api/send', (req, res) => {
-  const { message } = req.body
-  if (!message) {
+  const message = req.body?.message
+  if (typeof message !== 'string' || message.length === 0) {
     return res.status(400).json({ error: 'Message required' })
+  }
+  if (message.length > MAX_MESSAGE_CONTENT_CHARS) {
+    return res.status(413).json({ error: 'Message too large' })
   }
 
   const success = tmuxBridge.sendMessage(message)
@@ -139,6 +168,11 @@ const clientStates = new WeakMap<WebSocket, ClientState>()
 // WebSocket handling for real-time communication
 wss.on('connection', (ws: WebSocket) => {
   console.log('Client connected')
+
+  // Prevent unhandled 'error' from crashing the process
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error)
+  })
 
   // Initialize client state
   const panes = tmuxBridge.listPanes()
@@ -173,10 +207,19 @@ wss.on('connection', (ws: WebSocket) => {
 
   // Handle incoming messages
   ws.on('message', (data: Buffer) => {
+    let msg: any
     try {
-      const msg = JSON.parse(data.toString())
+      msg = JSON.parse(data.toString('utf-8'))
+    } catch {
+      return // Ignore non-JSON frames
+    }
+    if (!msg || typeof msg !== 'object') return
+
+    try {
       const clientState = clientStates.get(ws)
-      const paneTarget = msg.paneTarget || clientState?.activePaneTarget
+      // Resolve the pane target: either client-provided (validated) or the active one
+      const requestedTarget = typeof msg.paneTarget === 'string' ? validatePaneTarget(msg.paneTarget) : null
+      const paneTarget = requestedTarget ?? clientState?.activePaneTarget ?? undefined
 
       if (msg.type === 'switchPane') {
         // Client is switching to a different pane
@@ -196,6 +239,11 @@ wss.on('connection', (ws: WebSocket) => {
           }))
         }
       } else if (msg.type === 'send') {
+        if (typeof msg.content !== 'string' || msg.content.length === 0) return
+        if (msg.content.length > MAX_MESSAGE_CONTENT_CHARS) {
+          ws.send(JSON.stringify({ type: 'sent', success: false, error: 'Message too large' }))
+          return
+        }
         const success = tmuxBridge.sendMessage(msg.content, paneTarget)
         ws.send(JSON.stringify({
           type: 'sent',
@@ -204,6 +252,7 @@ wss.on('connection', (ws: WebSocket) => {
           paneId: clientState?.activePane
         }))
       } else if (msg.type === 'key') {
+        // sendKey whitelists the key name internally and returns false for anything else
         const success = tmuxBridge.sendKey(msg.key, paneTarget)
         ws.send(JSON.stringify({
           type: 'keySent',
@@ -226,27 +275,25 @@ wss.on('connection', (ws: WebSocket) => {
           mode: tmuxBridge.detectMode(paneTarget)
         }))
       } else if (msg.type === 'resize') {
-        const cols = parseInt(msg.cols, 10)
-        if (cols && cols > 0) {
-          const success = tmuxBridge.resizePane(cols, undefined, paneTarget)
-          if (success) {
-            // After resize, send updated output
-            setTimeout(() => {
-              ws.send(JSON.stringify({
-                type: 'output',
-                paneId: clientState?.activePane,
-                lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
-                mode: tmuxBridge.detectMode(paneTarget)
-              }))
-            }, 100)
-          }
+        const cols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
+        if (!Number.isInteger(cols) || cols <= 0 || cols > 1000) return
+        const success = tmuxBridge.resizePane(cols, undefined, paneTarget)
+        if (success) {
+          // After resize, send updated output
+          setTimeout(() => {
+            ws.send(JSON.stringify({
+              type: 'output',
+              paneId: clientState?.activePane,
+              lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
+              mode: tmuxBridge.detectMode(paneTarget)
+            }))
+          }, 100)
         }
       } else if (msg.type === 'typing') {
-        // Client is typing - slow down polling to reduce main thread work
         tmuxBridge.setTypingState(msg.isTyping === true)
       }
     } catch (error) {
-      console.error('Invalid message:', error)
+      console.error('Error handling WS message:', error)
     }
   })
 
@@ -270,7 +317,11 @@ tmuxBridge.on('output', (rawContent: string, paneId: string, paneTarget: string)
       const clientState = clientStates.get(client)
       // Send to clients watching this pane
       if (clientState?.activePane === paneId) {
-        client.send(message)
+        try {
+          client.send(message)
+        } catch (err) {
+          console.error('Failed to send to client:', err)
+        }
       }
     }
   })

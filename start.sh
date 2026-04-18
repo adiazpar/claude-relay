@@ -3,6 +3,10 @@
 # Claude Relay - Start Script
 # This script starts the relay server that connects to Claude Code in tmux
 
+set -euo pipefail
+
+trap 'echo "Relay stopped"' EXIT
+
 TMUX_SESSION="${TMUX_SESSION:-dev}"
 RELAY_PORT="${PORT:-3001}"
 

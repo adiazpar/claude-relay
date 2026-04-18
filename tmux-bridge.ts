@@ -1,11 +1,13 @@
-import { execSync, exec } from 'child_process'
+import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
-import * as fs from 'fs'
-import * as path from 'path'
 
 const TMUX_SESSION = process.env.TMUX_SESSION || 'dev'
 const POLL_INTERVAL = 500 // ms
 const CAPTURE_LINES = 500 // lines
+const MAX_BUFFER = 10 * 1024 * 1024
+
+// Strip ANSI escape sequences (colors, cursor moves, etc.) for reliable string matching.
+const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g
 
 export interface PaneInfo {
   id: string           // e.g., "@0" (window id)
@@ -30,10 +32,18 @@ export class TmuxBridge extends EventEmitter {
   // No-op for compatibility (typing state no longer affects polling)
   setTypingState(_isTyping: boolean) {}
 
-  // Check if tmux session exists
+  // Run tmux with argv form — no shell, no injection possible from arg values.
+  private runTmux(args: string[]): string {
+    return execFileSync('tmux', args, {
+      encoding: 'utf-8',
+      maxBuffer: MAX_BUFFER,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  }
+
   sessionExists(): boolean {
     try {
-      execSync(`tmux has-session -t ${TMUX_SESSION} 2>/dev/null`)
+      execFileSync('tmux', ['has-session', '-t', TMUX_SESSION], { stdio: 'ignore' })
       return true
     } catch {
       return false
@@ -47,12 +57,8 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      // Use list-windows instead of list-panes so each "pane" is a full-size window
-      // #{pane_current_path} gets the cwd of the active pane in each window
-      const output = execSync(
-        `tmux list-windows -t ${TMUX_SESSION} -F "#{window_id}\t#{session_name}:#{window_index}\t#{window_index}\t#{window_index}\t#{pane_current_path}\t#{window_width}\t#{window_height}"`,
-        { encoding: 'utf-8' }
-      )
+      const fmt = '#{window_id}\t#{session_name}:#{window_index}\t#{window_index}\t#{window_index}\t#{pane_current_path}\t#{window_width}\t#{window_height}'
+      const output = this.runTmux(['list-windows', '-t', TMUX_SESSION, '-F', fmt])
 
       const panes: PaneInfo[] = output.trim().split('\n').filter(Boolean).map(line => {
         const [id, target, index, windowIndex, cwd, width, height] = line.split('\t')
@@ -78,11 +84,7 @@ export class TmuxBridge extends EventEmitter {
   // Get working directory for a specific pane
   getPaneWorkingDirectory(target: string): string {
     try {
-      const output = execSync(
-        `tmux display-message -t ${target} -p "#{pane_current_path}"`,
-        { encoding: 'utf-8' }
-      ).trim()
-      return output
+      return this.runTmux(['display-message', '-t', target, '-p', '#{pane_current_path}']).trim()
     } catch (error) {
       console.error('Failed to get pane cwd:', error)
       return ''
@@ -97,12 +99,11 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      // Create new window, optionally in a specific directory
+      const args = ['new-window', '-t', TMUX_SESSION]
       if (cwd) {
-        execSync(`tmux new-window -t ${TMUX_SESSION} -c '${cwd.replace(/'/g, "'\\''")}'`)
-      } else {
-        execSync(`tmux new-window -t ${TMUX_SESSION}`)
+        args.push('-c', cwd)
       }
+      this.runTmux(args)
 
       // Get the updated pane list and return the new window (last one)
       const panes = this.listPanes()
@@ -121,7 +122,7 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      execSync(`tmux kill-window -t ${target}`)
+      this.runTmux(['kill-window', '-t', target])
       return true
     } catch (error) {
       console.error('Failed to close window:', error)
@@ -138,14 +139,10 @@ export class TmuxBridge extends EventEmitter {
 
     try {
       const paneTarget = target || TMUX_SESSION
-      // Escape special characters for tmux
-      const escaped = this.escapeForTmux(message)
-
-      // Send the message to the tmux pane
-      execSync(`tmux send-keys -t ${paneTarget} -l ${escaped}`)
-      // Press Enter to submit
-      execSync(`tmux send-keys -t ${paneTarget} Enter`)
-
+      // -l sends literal keys; argv form means no shell quoting needed
+      this.runTmux(['send-keys', '-t', paneTarget, '-l', message])
+      // C-m is the canonical tmux spelling of carriage return
+      this.runTmux(['send-keys', '-t', paneTarget, 'C-m'])
       return true
     } catch (error) {
       console.error('Failed to send message:', error)
@@ -153,31 +150,36 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Send a special key (arrow keys, Enter, Escape, etc.)
+  // Whitelist of keys the client is allowed to send, mapped to tmux key names.
+  private static readonly KEY_MAP: Record<string, string> = {
+    'Up': 'Up',
+    'Down': 'Down',
+    'Left': 'Left',
+    'Right': 'Right',
+    'Enter': 'C-m',
+    'Escape': 'Escape',
+    'Tab': 'Tab',
+    'S-Tab': 'BTab',      // Shift+Tab (cycle permissions mode)
+    'Space': 'Space',
+    'Backspace': 'BSpace',
+  }
+
+  // Send a special key (arrow keys, Enter, Escape, etc.). Returns false for unknown keys.
   sendKey(key: string, target?: string): boolean {
     if (!this.sessionExists()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
     }
 
+    const tmuxKey = TmuxBridge.KEY_MAP[key]
+    if (!tmuxKey) {
+      console.error('Rejected unknown key:', key)
+      return false
+    }
+
     try {
       const paneTarget = target || TMUX_SESSION
-      // Map key names to tmux key names
-      const keyMap: Record<string, string> = {
-        'Up': 'Up',
-        'Down': 'Down',
-        'Left': 'Left',
-        'Right': 'Right',
-        'Enter': 'Enter',
-        'Escape': 'Escape',
-        'Tab': 'Tab',
-        'S-Tab': 'BTab',      // Shift+Tab (cycle permissions mode)
-        'Space': 'Space',
-        'Backspace': 'BSpace',
-      }
-
-      const tmuxKey = keyMap[key] || key
-      execSync(`tmux send-keys -t ${paneTarget} ${tmuxKey}`)
+      this.runTmux(['send-keys', '-t', paneTarget, tmuxKey])
       return true
     } catch (error) {
       console.error('Failed to send key:', error)
@@ -185,24 +187,12 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Escape message for tmux send-keys -l (literal mode)
-  private escapeForTmux(message: string): string {
-    // For -l (literal) mode, we just need to quote the string
-    // Replace single quotes with escaped version
-    const escaped = message.replace(/'/g, "'\\''")
-    return `'${escaped}'`
-  }
-
   // Capture current pane content with ANSI colors preserved
-  capturePane(lines = 500, target?: string): string {
+  capturePane(lines = CAPTURE_LINES, target?: string): string {
     try {
       const paneTarget = target || TMUX_SESSION
-      const output = execSync(
-        `tmux capture-pane -t ${paneTarget} -p -e -S -${lines}`,
-        // -e flag preserves escape sequences (ANSI colors)
-        { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }
-      )
-      return output
+      // -e flag preserves escape sequences (ANSI colors)
+      return this.runTmux(['capture-pane', '-t', paneTarget, '-p', '-e', '-S', `-${lines}`])
     } catch (error) {
       console.error('Failed to capture pane:', error)
       return ''
@@ -251,21 +241,7 @@ export class TmuxBridge extends EventEmitter {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
-  }
-
-  // Extract new content from output diff
-  private getNewContent(oldOutput: string, newOutput: string): string {
-    const oldLines = oldOutput.split('\n')
-    const newLines = newOutput.split('\n')
-
-    // Find where they diverge
-    let i = 0
-    while (i < oldLines.length && i < newLines.length && oldLines[i] === newLines[i]) {
-      i++
-    }
-
-    // Return new lines
-    return newLines.slice(i).join('\n').trim()
+    this.lastOutputByPane.clear()
   }
 
   // Get full pane content (for initial load)
@@ -275,18 +251,17 @@ export class TmuxBridge extends EventEmitter {
 
   // Check if Claude Code is running (look for the mode indicator unique to Claude Code UI)
   isClaudeRunning(target?: string): boolean {
-    const output = this.capturePane(50, target)
+    const output = this.capturePane(50, target).replace(ANSI_RE, '')
     // Look for Claude Code's mode selector "(shift+tab to cycle)" which is unique to its UI
-    return /shift\+tab/i.test(output)
+    return /shift\s*\+\s*tab/i.test(output)
   }
 
   // Detect current Claude Code permission mode from output
   detectMode(target?: string): 'plan' | 'normal' | 'auto-edit' | 'bypass' {
-    const output = this.capturePane(30, target)
+    const output = this.capturePane(30, target).replace(ANSI_RE, '')
 
-    // Look for the mode indicator line which contains "(shift+tab" to avoid false matches
     // The actual indicator looks like: ">> bypass permissions on (shift+tab to cycle)"
-    const modeLineMatch = output.match(/.*(shift\+tab|shift\s*\+\s*tab).*/i)
+    const modeLineMatch = output.match(/.*(shift\s*\+\s*tab).*/i)
     if (!modeLineMatch) {
       return 'normal' // No mode indicator found
     }
@@ -318,20 +293,24 @@ export class TmuxBridge extends EventEmitter {
 
     try {
       const paneTarget = target || TMUX_SESSION
-      // Set window-size to manual to allow arbitrary sizing
-      execSync(`tmux set-window-option -t ${paneTarget} window-size manual 2>/dev/null || true`)
+
+      // Set window-size to manual to allow arbitrary sizing (allow failure)
+      try {
+        this.runTmux(['set-window-option', '-t', paneTarget, 'window-size', 'manual'])
+      } catch {
+        // Older tmux versions may not support window-size manual; continue anyway
+      }
 
       // Clamp columns to reasonable range
       const safeCols = Math.max(40, Math.min(300, cols))
 
       // Use resize-window instead of resize-pane - this works regardless of attached client size
-      if (rows) {
+      const args = ['resize-window', '-t', paneTarget, '-x', String(safeCols)]
+      if (rows !== undefined) {
         const safeRows = Math.max(10, Math.min(100, rows))
-        execSync(`tmux resize-window -t ${paneTarget} -x ${safeCols} -y ${safeRows}`)
-      } else {
-        execSync(`tmux resize-window -t ${paneTarget} -x ${safeCols}`)
+        args.push('-y', String(safeRows))
       }
-
+      this.runTmux(args)
       return true
     } catch (error) {
       console.error('Failed to resize window:', error)
@@ -346,7 +325,7 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      execSync(`tmux select-window -t ${target}`)
+      this.runTmux(['select-window', '-t', target])
       return true
     } catch (error) {
       console.error('Failed to select window:', error)
@@ -358,10 +337,7 @@ export class TmuxBridge extends EventEmitter {
   getPaneDimensions(target?: string): { cols: number; rows: number } | null {
     try {
       const paneTarget = target || TMUX_SESSION
-      const output = execSync(
-        `tmux display-message -t ${paneTarget} -p '#{pane_width} #{pane_height}'`,
-        { encoding: 'utf-8' }
-      ).trim()
+      const output = this.runTmux(['display-message', '-t', paneTarget, '-p', '#{pane_width} #{pane_height}']).trim()
       const [cols, rows] = output.split(' ').map(Number)
       return { cols, rows }
     } catch {

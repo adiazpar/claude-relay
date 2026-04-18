@@ -6,3 +6,9 @@ certs/
 *.d.ts
 !public/*.js
 .DS_Store
+.claude/
+.env
+.env.*
+*.log
+*.pem
+*.key

@@ -929,7 +929,7 @@
         </svg>
         <span>Change mode</span>
       </button>
-      <button class="commands-btn" id="commandsBtn" onclick="toggleCommandPalette()" title="Slash Commands">/</button>
+      <button class="commands-btn" id="commandsBtn" onclick="toggleCommandPalette()" title="Slash Commands" aria-label="Slash commands">/</button>
     </div>
     <!-- Command palette drawer -->
     <div class="command-palette" id="commandPalette">
@@ -951,7 +951,7 @@
         spellcheck="true"
         data-form-type="other"
       ></textarea>
-      <button class="send-btn show-mic" id="sendBtn" onclick="handleSendButton()">
+      <button class="send-btn show-mic" id="sendBtn" onclick="handleSendButton()" aria-label="Send message">
         <!-- Send arrow icon -->
         <svg class="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 19V5"/>
@@ -983,6 +983,20 @@
     };
     window.cancelIdleCallback = window.cancelIdleCallback || function(id) {
       clearTimeout(id);
+    };
+
+    // Escape untrusted strings for safe use inside HTML text and attribute values.
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[c]);
+    }
+
+    // localStorage wrapper that swallows quota/private-mode errors instead of crashing.
+    const storage = {
+      get(key) { try { return storage.get(key); } catch { return null; } },
+      set(key, val) { try { storage.set(key, val); } catch (e) { console.warn('localStorage set failed:', e); } },
+      remove(key) { try { storage.remove(key); } catch {} }
     };
 
     // ANSI to HTML converter - handles 256 colors and common codes
@@ -1212,25 +1226,33 @@
 
     // Render command list
     function renderCommands() {
+      commandList.replaceChildren();
       if (allCommands.length === 0) {
-        commandList.innerHTML = '<div class="command-empty">No commands available</div>';
+        const empty = document.createElement('div');
+        empty.className = 'command-empty';
+        empty.textContent = 'No commands available';
+        commandList.appendChild(empty);
         return;
       }
 
-      commandList.innerHTML = allCommands.map(cmd => `
-        <div class="command-item" data-command="${cmd.name}">
-          <span class="command-name">/${cmd.name}</span>
-          <span class="command-description">${cmd.description}</span>
-        </div>
-      `).join('');
+      for (const cmd of allCommands) {
+        const item = document.createElement('div');
+        item.className = 'command-item';
+        item.dataset.command = cmd.name;
 
-      // Add click handlers
-      commandList.querySelectorAll('.command-item').forEach(item => {
-        item.addEventListener('click', () => {
-          const cmdName = item.dataset.command;
-          selectCommand(cmdName);
-        });
-      });
+        const name = document.createElement('span');
+        name.className = 'command-name';
+        name.textContent = '/' + cmd.name;
+
+        const desc = document.createElement('span');
+        desc.className = 'command-description';
+        desc.textContent = cmd.description;
+
+        item.appendChild(name);
+        item.appendChild(desc);
+        item.addEventListener('click', () => selectCommand(cmd.name));
+        commandList.appendChild(item);
+      }
     }
 
     // Select a command and fill input
@@ -1441,12 +1463,20 @@
     // ============================================
     // WEBSOCKET & MESSAGE HANDLING
     // ============================================
+    let reconnectDelay = 500;
+    const RECONNECT_MIN = 500;
+    const RECONNECT_MAX = 30000;
+    let reconnectTimer = null;
+
     function connect() {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${protocol}//${window.location.host}`);
 
       ws.onopen = () => {
         connected = true;
+        reconnectDelay = RECONNECT_MIN;
         updateStatus();
         sendResize();
       };
@@ -1454,7 +1484,9 @@
       ws.onclose = () => {
         connected = false;
         updateStatus();
-        setTimeout(connect, 500);
+        // Exponential backoff with cap — avoids hammering the server on outage.
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
       };
 
       ws.onerror = (error) => {
@@ -1462,7 +1494,13 @@
       };
 
       ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch (err) {
+          console.error('Invalid WS message:', err);
+          return;
+        }
         handleMessage(msg);
       };
     }
@@ -1513,7 +1551,7 @@
       // Set initial active pane if not set
       if (!activePaneId && allPanes.length > 0) {
         // Try to restore from localStorage
-        const savedPaneId = localStorage.getItem(STORAGE_KEYS.activePane);
+        const savedPaneId = storage.get(STORAGE_KEYS.activePane);
         const savedPane = savedPaneId && allPanes.find(p => p.id === savedPaneId);
         if (savedPane) {
           activePaneId = savedPane.id;
@@ -1539,46 +1577,34 @@
       // Always show tabs (even with one pane, to allow adding more)
       paneTabs.classList.remove('hidden');
       output.classList.add('with-tabs');
+      paneTabs.replaceChildren();
 
-      const tabsHtml = allPanes.map(pane => {
-        // Get custom name from localStorage, or fall back to directory name
+      for (const pane of allPanes) {
         const dirName = pane.cwd.split('/').pop() || pane.cwd;
-        const customName = localStorage.getItem(STORAGE_KEYS.tabName(pane.id));
+        const customName = storage.get(STORAGE_KEYS.tabName(pane.id));
         const displayName = customName || dirName;
         const isActive = pane.id === activePaneId;
-        return `
-          <div class="pane-tab ${isActive ? 'active' : ''}" data-pane-id="${pane.id}" data-pane-target="${pane.target}" data-dir-name="${dirName}">
-            <span class="pane-tab-name">${displayName}</span>
-          </div>
-        `;
-      }).join('');
 
-      // Add the + button at the end
-      paneTabs.innerHTML = tabsHtml + `
-        <button class="pane-tab-add" title="New window">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 5v14"/><path d="M5 12h14"/>
-          </svg>
-          <span>New</span>
-        </button>
-      `;
+        const tab = document.createElement('div');
+        tab.className = 'pane-tab' + (isActive ? ' active' : '');
+        tab.dataset.paneId = pane.id;
+        tab.dataset.paneTarget = pane.target;
+        tab.dataset.dirName = dirName;
 
-      // Add click and long-press handlers for tabs
-      paneTabs.querySelectorAll('.pane-tab').forEach(tab => {
-        if (tab.classList.contains('pane-tab-add')) return;
+        const name = document.createElement('span');
+        name.className = 'pane-tab-name';
+        name.textContent = displayName;
+        tab.appendChild(name);
 
-        const paneId = tab.dataset.paneId;
-        const paneTarget = tab.dataset.paneTarget;
-        const dirName = tab.dataset.dirName;
+        const paneId = pane.id;
+        const paneTarget = pane.target;
         let longPressTimer = null;
         let isLongPress = false;
 
-        // Long press detection
         const startLongPress = () => {
           isLongPress = false;
           longPressTimer = setTimeout(() => {
             isLongPress = true;
-            // Trigger haptic feedback and animation
             triggerHaptic();
             tab.classList.add('long-press-feedback');
             setTimeout(() => tab.classList.remove('long-press-feedback'), 200);
@@ -1586,15 +1612,11 @@
           }, 500);
         };
 
-        const cancelLongPress = () => {
-          clearTimeout(longPressTimer);
-        };
+        const cancelLongPress = () => clearTimeout(longPressTimer);
 
-        // Touch events for long press
         tab.addEventListener('touchstart', startLongPress, { passive: true });
         tab.addEventListener('touchend', () => {
           cancelLongPress();
-          // If it wasn't a long press, handle as tap
           if (!isLongPress && paneId !== activePaneId) {
             animateButton(tab);
             switchPane(paneId);
@@ -1603,7 +1625,6 @@
         tab.addEventListener('touchmove', cancelLongPress, { passive: true });
         tab.addEventListener('touchcancel', cancelLongPress);
 
-        // Mouse events for desktop
         tab.addEventListener('mousedown', startLongPress);
         tab.addEventListener('mouseup', () => {
           cancelLongPress();
@@ -1613,14 +1634,43 @@
           }
         });
         tab.addEventListener('mouseleave', cancelLongPress);
-      });
 
-      // Add click handler for + button
-      const addBtn = paneTabs.querySelector('.pane-tab-add');
+        paneTabs.appendChild(tab);
+      }
+
+      // Add the + button at the end (SVG built with namespaced createElementNS to avoid innerHTML)
+      const addBtn = document.createElement('button');
+      addBtn.className = 'pane-tab-add';
+      addBtn.title = 'New window';
+      addBtn.setAttribute('aria-label', 'New window');
+
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('width', '14');
+      svg.setAttribute('height', '14');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('fill', 'none');
+      svg.setAttribute('stroke', 'currentColor');
+      svg.setAttribute('stroke-width', '2');
+      svg.setAttribute('stroke-linecap', 'round');
+      svg.setAttribute('stroke-linejoin', 'round');
+      const p1 = document.createElementNS(SVG_NS, 'path');
+      p1.setAttribute('d', 'M12 5v14');
+      const p2 = document.createElementNS(SVG_NS, 'path');
+      p2.setAttribute('d', 'M5 12h14');
+      svg.appendChild(p1);
+      svg.appendChild(p2);
+      addBtn.appendChild(svg);
+
+      const addLabel = document.createElement('span');
+      addLabel.textContent = 'New';
+      addBtn.appendChild(addLabel);
+
       addBtn.addEventListener('click', () => {
         animateButton(addBtn);
         createNewWindow();
       });
+      paneTabs.appendChild(addBtn);
     }
 
     // ============================================
@@ -1662,44 +1712,59 @@
     let currentActionPaneId = null;
     let currentActionPaneTarget = null;
 
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    function svgEl(attrs, pathDs) {
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      for (const [k, v] of Object.entries(attrs)) svg.setAttribute(k, v);
+      for (const d of pathDs) {
+        const p = document.createElementNS(SVG_NS, 'path');
+        p.setAttribute('d', d);
+        svg.appendChild(p);
+      }
+      return svg;
+    }
+
     function openTabActionSheet(paneId, paneTarget, dirName) {
       currentActionPaneId = paneId;
       currentActionPaneTarget = paneTarget;
 
       // Get current display name
-      const customName = localStorage.getItem(STORAGE_KEYS.tabName(paneId));
+      const customName = storage.get(STORAGE_KEYS.tabName(paneId));
       const displayName = customName || dirName;
       tabActionName.textContent = displayName;
 
       // Build options
       const canClose = allPanes.length > 1;
-      tabActionOptions.innerHTML = `
-        <div class="tab-action-option" id="tabActionRename">
-          <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
-            <path d="m15 5 4 4"/>
-          </svg>
-          Rename
-        </div>
-        <div class="tab-action-option danger ${canClose ? '' : 'disabled'}" id="tabActionClose">
-          <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
-          </svg>
-          Close Tab
-        </div>
-      `;
+      tabActionOptions.replaceChildren();
 
-      // Add event listeners
-      document.getElementById('tabActionRename').addEventListener('click', () => {
+      const renameOpt = document.createElement('div');
+      renameOpt.className = 'tab-action-option';
+      renameOpt.id = 'tabActionRename';
+      renameOpt.appendChild(svgEl(
+        { viewBox: '0 0 24 24', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+        ['M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z', 'm15 5 4 4']
+      ));
+      renameOpt.appendChild(document.createTextNode('Rename'));
+      renameOpt.addEventListener('click', () => {
         showRenameMode(paneId, displayName, dirName);
       });
+      tabActionOptions.appendChild(renameOpt);
 
+      const closeOpt = document.createElement('div');
+      closeOpt.className = 'tab-action-option danger' + (canClose ? '' : ' disabled');
+      closeOpt.id = 'tabActionClose';
+      closeOpt.appendChild(svgEl(
+        { viewBox: '0 0 24 24', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+        ['M18 6 6 18', 'm6 6 12 12']
+      ));
+      closeOpt.appendChild(document.createTextNode('Close Tab'));
       if (canClose) {
-        document.getElementById('tabActionClose').addEventListener('click', () => {
+        closeOpt.addEventListener('click', () => {
           closeTabActionSheet();
           closeWindow(paneTarget);
         });
       }
+      tabActionOptions.appendChild(closeOpt);
 
       // Show sheet
       tabActionSheet.classList.add('open');
@@ -1714,17 +1779,29 @@
     }
 
     function showRenameMode(paneId, currentName, dirName) {
-      tabActionOptions.innerHTML = `
-        <input type="text" class="tab-rename-input" id="tabRenameInput" value="${currentName}" placeholder="${dirName}">
-        <div class="tab-rename-actions">
-          <button class="tab-rename-cancel" id="tabRenameCancel">Cancel</button>
-          <button class="tab-rename-save" id="tabRenameSave">Save</button>
-        </div>
-      `;
+      tabActionOptions.replaceChildren();
 
-      const input = document.getElementById('tabRenameInput');
-      const cancelBtn = document.getElementById('tabRenameCancel');
-      const saveBtn = document.getElementById('tabRenameSave');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'tab-rename-input';
+      input.id = 'tabRenameInput';
+      input.value = currentName; // setting via property, no HTML parsing
+      input.placeholder = dirName;
+      tabActionOptions.appendChild(input);
+
+      const actions = document.createElement('div');
+      actions.className = 'tab-rename-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'tab-rename-cancel';
+      cancelBtn.id = 'tabRenameCancel';
+      cancelBtn.textContent = 'Cancel';
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'tab-rename-save';
+      saveBtn.id = 'tabRenameSave';
+      saveBtn.textContent = 'Save';
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+      tabActionOptions.appendChild(actions);
 
       // Focus and select input
       input.focus();
@@ -1734,10 +1811,10 @@
       const saveRename = () => {
         const newName = input.value.trim();
         if (newName && newName !== dirName) {
-          localStorage.setItem(STORAGE_KEYS.tabName(paneId), newName);
+          storage.set(STORAGE_KEYS.tabName(paneId), newName);
         } else {
           // If empty or same as dir name, remove custom name
-          localStorage.removeItem(STORAGE_KEYS.tabName(paneId));
+          storage.remove(STORAGE_KEYS.tabName(paneId));
         }
         closeTabActionSheet();
         renderPaneTabs();
@@ -1826,7 +1903,7 @@
       // Set new active pane
       activePaneId = pane.id;
       activePaneTarget = pane.target;
-      localStorage.setItem(STORAGE_KEYS.activePane, paneId);
+      storage.set(STORAGE_KEYS.activePane, paneId);
 
       // Restore state for new pane
       restorePaneState(paneId);
@@ -1867,9 +1944,9 @@
       state.scrollPosition = output.scrollTop;
 
       // Save to localStorage
-      localStorage.setItem(STORAGE_KEYS.inputText(paneId), state.inputText);
+      storage.set(STORAGE_KEYS.inputText(paneId), state.inputText);
       if (state.selectedLanguage && state.selectedLanguage.code) {
-        localStorage.setItem(STORAGE_KEYS.language(paneId), state.selectedLanguage.code);
+        storage.set(STORAGE_KEYS.language(paneId), state.selectedLanguage.code);
       }
     }
 
@@ -1879,8 +1956,8 @@
       if (!state) return;
 
       // Restore from localStorage if available
-      const savedInput = localStorage.getItem(STORAGE_KEYS.inputText(paneId));
-      const savedLang = localStorage.getItem(STORAGE_KEYS.language(paneId));
+      const savedInput = storage.get(STORAGE_KEYS.inputText(paneId));
+      const savedLang = storage.get(STORAGE_KEYS.language(paneId));
 
       if (savedInput !== null) {
         state.inputText = savedInput;
@@ -1980,26 +2057,41 @@
     // Render language options
     function renderLanguages() {
       languageActionCurrent.textContent = `${selectedLanguage.flag} ${selectedLanguage.name}`;
-      languageList.innerHTML = languages.map(lang => `
-        <div class="language-item ${lang.code === selectedLanguage.code ? 'selected' : ''}" data-code="${lang.code}">
-          <span class="language-flag">${lang.flag}</span>
-          <span class="language-name">${lang.name}</span>
-          <svg class="language-check" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="20 6 9 17 4 12"></polyline>
-          </svg>
-        </div>
-      `).join('');
+      languageList.replaceChildren();
 
-      // Add click handlers
-      languageList.querySelectorAll('.language-item').forEach(item => {
-        item.addEventListener('click', () => {
-          const code = item.dataset.code;
-          const lang = languages.find(l => l.code === code);
-          if (lang) {
-            selectLanguage(lang);
-          }
-        });
-      });
+      for (const lang of languages) {
+        const item = document.createElement('div');
+        item.className = 'language-item' + (lang.code === selectedLanguage.code ? ' selected' : '');
+        item.dataset.code = lang.code;
+
+        const flag = document.createElement('span');
+        flag.className = 'language-flag';
+        flag.textContent = lang.flag;
+
+        const name = document.createElement('span');
+        name.className = 'language-name';
+        name.textContent = lang.name;
+
+        const check = document.createElementNS(SVG_NS, 'svg');
+        check.setAttribute('class', 'language-check');
+        check.setAttribute('width', '20');
+        check.setAttribute('height', '20');
+        check.setAttribute('viewBox', '0 0 24 24');
+        check.setAttribute('fill', 'none');
+        check.setAttribute('stroke', 'currentColor');
+        check.setAttribute('stroke-width', '2.5');
+        check.setAttribute('stroke-linecap', 'round');
+        check.setAttribute('stroke-linejoin', 'round');
+        const poly = document.createElementNS(SVG_NS, 'polyline');
+        poly.setAttribute('points', '20 6 9 17 4 12');
+        check.appendChild(poly);
+
+        item.appendChild(flag);
+        item.appendChild(name);
+        item.appendChild(check);
+        item.addEventListener('click', () => selectLanguage(lang));
+        languageList.appendChild(item);
+      }
     }
 
     // Open language action sheet
@@ -2088,8 +2180,10 @@
       const hasText = messageInput.value.trim().length > 0;
       if (hasText || isPWA) {
         sendBtn.classList.remove('show-mic');
+        sendBtn.setAttribute('aria-label', 'Send message');
       } else {
         sendBtn.classList.add('show-mic');
+        sendBtn.setAttribute('aria-label', 'Voice input');
       }
     }
 
@@ -2364,9 +2458,9 @@
         if (!activePaneId) return;
         const text = messageInput.value;
         if (text) {
-          localStorage.setItem(STORAGE_KEYS.inputText(activePaneId), text);
+          storage.set(STORAGE_KEYS.inputText(activePaneId), text);
         } else {
-          localStorage.removeItem(STORAGE_KEYS.inputText(activePaneId));
+          storage.remove(STORAGE_KEYS.inputText(activePaneId));
         }
         // Also update pane state
         const state = paneStates.get(activePaneId);
@@ -2378,7 +2472,7 @@
     const originalSendMessage = sendMessage;
     sendMessage = function() {
       if (activePaneId) {
-        localStorage.removeItem(STORAGE_KEYS.inputText(activePaneId));
+        storage.remove(STORAGE_KEYS.inputText(activePaneId));
         const state = paneStates.get(activePaneId);
         if (state) state.inputText = '';
       }
@@ -2389,7 +2483,7 @@
     const originalSelectLanguage = selectLanguage;
     selectLanguage = function(lang) {
       if (activePaneId) {
-        localStorage.setItem(STORAGE_KEYS.language(activePaneId), lang.code);
+        storage.set(STORAGE_KEYS.language(activePaneId), lang.code);
         const state = paneStates.get(activePaneId);
         if (state) state.selectedLanguage = lang;
       }
