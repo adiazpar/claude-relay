@@ -1408,9 +1408,14 @@
     let isIntentionalSocketClose = false;
     let resumeSyncTimer = null;
     let lastResumeSyncAt = 0;
+    let restInitSeq = 0;
 
     function isSocketUsable() {
       return !!ws && ws.readyState === WebSocket.OPEN;
+    }
+
+    function hasLiveSocket() {
+      return !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
     }
 
     function closeSocket(intentional = false) {
@@ -1441,7 +1446,7 @@
 
     function connect() {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      if (isSocketUsable()) return;
+      if (hasLiveSocket()) return;
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const socket = new WebSocket(`${protocol}//${window.location.host}`);
@@ -2349,12 +2354,11 @@
       if (resumeSyncTimer) clearTimeout(resumeSyncTimer);
       resumeSyncTimer = setTimeout(() => {
         reconnectDelay = RECONNECT_MIN;
+        connected = false;
+        updateStatus();
         closeSocket(true);
-        initializeFromREST().finally(() => {
-          connected = true;
-          updateStatus();
-          connect();
-        });
+        connect();
+        initializeFromREST({ timeoutMs: 2500, background: true });
       }, 0);
     }
 
@@ -2535,24 +2539,41 @@
     updateButtonState();
 
     // Immediately fetch everything via REST - don't wait for WebSocket
-    async function initializeFromREST() {
+    async function initializeFromREST(options = {}) {
+      const { timeoutMs = 5000, background = false } = options;
+      const seq = ++restInitSeq;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       try {
         // Fetch pane list
-        const panesRes = await fetch('/api/panes');
+        const panesRes = await fetch('/api/panes', { signal: controller.signal, cache: 'no-store' });
         const panesData = await panesRes.json();
+        if (seq !== restInitSeq) return;
         handlePaneList(panesData.panes);
 
         // Fetch output for active pane
         if (activePaneTarget) {
-          const outputRes = await fetch(`/api/output?target=${encodeURIComponent(activePaneTarget)}`);
+          const outputRes = await fetch(`/api/output?target=${encodeURIComponent(activePaneTarget)}`, {
+            signal: controller.signal,
+            cache: 'no-store'
+          });
           const outputData = await outputRes.json();
+          if (seq !== restInitSeq) return;
           if (outputData.output) {
             applyLinesUpdate(outputData.output.split('\n'), null, activePaneId);
           }
         }
 
       } catch (e) {
-        console.error('REST init failed:', e);
+        if (e.name !== 'AbortError') {
+          console.error('REST init failed:', e);
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        if (!background && seq === restInitSeq && isSocketUsable()) {
+          connected = true;
+          updateStatus();
+        }
       }
     }
 
