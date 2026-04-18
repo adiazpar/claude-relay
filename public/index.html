@@ -446,7 +446,7 @@
 
     /* Input area - extends .fixed-bar-bottom from global.css. */
     .input-area {
-      padding: 24px 16px 12px 16px;
+      padding: 8px 16px 12px 16px;
       background: var(--bg-primary);
       touch-action: none; /* Prevent dragging */
     }
@@ -2586,6 +2586,22 @@
     window.addEventListener('focus', () => scheduleResumeSync('focus'));
     window.addEventListener('online', () => scheduleResumeSync('online'));
     window.addEventListener('pagehide', () => closeSocket(true));
+
+    // Foreground watchdog. The event-based scheduleResumeSync hooks above
+    // only fire when the tab backgrounds/refocuses or the network flips.
+    // If the tab stays foregrounded the whole time and the underlying TCP
+    // dies silently (mobile carrier NAT reset, iOS Safari drop), readyState
+    // stays OPEN and onclose never fires — the canvas just freezes. Server
+    // sends a ping every 15s and a paneRuntimeList every 2s, so >30s of
+    // radio silence means the socket is zombied regardless of what
+    // readyState claims. Trip the existing resume path.
+    const RX_STALE_MS = 30000;
+    setInterval(() => {
+      if (!connected) return; // exponential-backoff reconnect already running
+      if (Date.now() - lastRxTime > RX_STALE_MS) {
+        scheduleResumeSync('stale-rx');
+      }
+    }, 5000);
 
     // ============================================
     // iOS SCROLL FIXES
