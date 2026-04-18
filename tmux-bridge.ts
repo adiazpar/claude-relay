@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
 
 const TMUX_SESSION = process.env.TMUX_SESSION || 'dev'
+const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
 const CAPTURE_LINES = 500 // lines
 const MAX_BUFFER = 10 * 1024 * 1024
@@ -93,7 +94,7 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Create a new window in the session
-  createWindow(cwd = '/'): PaneInfo | null {
+  createWindow(cwd = DEFAULT_CWD): PaneInfo | null {
     if (!this.sessionExists()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return null
@@ -138,13 +139,16 @@ export class TmuxBridge extends EventEmitter {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
     }
+    if (!target) {
+      console.error('Refusing to send message without a pane target')
+      return false
+    }
 
     try {
-      const paneTarget = target || TMUX_SESSION
       // -l sends literal keys; argv form means no shell quoting needed
-      this.runTmux(['send-keys', '-t', paneTarget, '-l', message])
+      this.runTmux(['send-keys', '-t', target, '-l', message])
       // C-m is the canonical tmux spelling of carriage return
-      this.runTmux(['send-keys', '-t', paneTarget, 'C-m'])
+      this.runTmux(['send-keys', '-t', target, 'C-m'])
       return true
     } catch (error) {
       console.error('Failed to send message:', error)
@@ -172,6 +176,10 @@ export class TmuxBridge extends EventEmitter {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
     }
+    if (!target) {
+      console.error('Refusing to send key without a pane target')
+      return false
+    }
 
     const tmuxKey = TmuxBridge.KEY_MAP[key]
     if (!tmuxKey) {
@@ -180,8 +188,7 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      const paneTarget = target || TMUX_SESSION
-      this.runTmux(['send-keys', '-t', paneTarget, tmuxKey])
+      this.runTmux(['send-keys', '-t', target, tmuxKey])
       return true
     } catch (error) {
       console.error('Failed to send key:', error)
@@ -292,13 +299,15 @@ export class TmuxBridge extends EventEmitter {
     if (!this.sessionExists()) {
       return false
     }
+    if (!target) {
+      console.error('Refusing to resize without a pane target')
+      return false
+    }
 
     try {
-      const paneTarget = target || TMUX_SESSION
-
       // Set window-size to manual to allow arbitrary sizing (allow failure)
       try {
-        this.runTmux(['set-window-option', '-t', paneTarget, 'window-size', 'manual'])
+        this.runTmux(['set-window-option', '-t', target, 'window-size', 'manual'])
       } catch {
         // Older tmux versions may not support window-size manual; continue anyway
       }
@@ -307,7 +316,7 @@ export class TmuxBridge extends EventEmitter {
       const safeCols = Math.max(40, Math.min(300, cols))
 
       // Use resize-window instead of resize-pane - this works regardless of attached client size
-      const args = ['resize-window', '-t', paneTarget, '-x', String(safeCols)]
+      const args = ['resize-window', '-t', target, '-x', String(safeCols)]
       if (rows !== undefined) {
         const safeRows = Math.max(10, Math.min(100, rows))
         args.push('-y', String(safeRows))

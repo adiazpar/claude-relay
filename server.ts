@@ -154,7 +154,10 @@ app.post('/api/send', (req, res) => {
     return res.status(413).json({ error: 'Message too large' })
   }
 
-  const target = validatePaneTarget(req.body?.target) ?? undefined
+  const target = validatePaneTarget(req.body?.target)
+  if (!target) {
+    return res.status(400).json({ error: 'Valid target required' })
+  }
   const success = tmuxBridge.sendMessage(message, target)
   res.json({ success })
 })
@@ -166,7 +169,10 @@ app.post('/api/key', (req, res) => {
     return res.status(400).json({ error: 'Key required' })
   }
 
-  const target = validatePaneTarget(req.body?.target) ?? undefined
+  const target = validatePaneTarget(req.body?.target)
+  if (!target) {
+    return res.status(400).json({ error: 'Valid target required' })
+  }
   const success = tmuxBridge.sendKey(key, target)
   res.json({ success })
 })
@@ -177,6 +183,25 @@ interface ClientState {
   activePaneTarget: string | null
 }
 const clientStates = new WeakMap<WebSocket, ClientState>()
+
+function resolveClientPaneTarget(clientState?: ClientState): string | null {
+  if (!clientState) return null
+
+  const validatedTarget = clientState.activePaneTarget
+    ? validatePaneTarget(clientState.activePaneTarget)
+    : null
+  if (validatedTarget) {
+    clientState.activePaneTarget = validatedTarget
+    return validatedTarget
+  }
+
+  if (!clientState.activePane) return null
+  const pane = tmuxBridge.listPanes().find(p => p.id === clientState.activePane)
+  if (!pane) return null
+
+  clientState.activePaneTarget = pane.target
+  return pane.target
+}
 
 // WebSocket handling for real-time communication
 wss.on('connection', (ws: WebSocket) => {
@@ -232,7 +257,7 @@ wss.on('connection', (ws: WebSocket) => {
       const clientState = clientStates.get(ws)
       // Resolve the pane target: either client-provided (validated) or the active one
       const requestedTarget = typeof msg.paneTarget === 'string' ? validatePaneTarget(msg.paneTarget) : null
-      const paneTarget = requestedTarget ?? clientState?.activePaneTarget ?? undefined
+      const paneTarget = requestedTarget ?? resolveClientPaneTarget(clientState)
 
       if (msg.type === 'switchPane') {
         // Client is switching to a different pane
@@ -257,6 +282,10 @@ wss.on('connection', (ws: WebSocket) => {
           ws.send(JSON.stringify({ type: 'sent', success: false, error: 'Message too large' }))
           return
         }
+        if (!paneTarget) {
+          ws.send(JSON.stringify({ type: 'sent', success: false, error: 'No active pane target' }))
+          return
+        }
         const success = tmuxBridge.sendMessage(msg.content, paneTarget)
         ws.send(JSON.stringify({
           type: 'sent',
@@ -266,6 +295,10 @@ wss.on('connection', (ws: WebSocket) => {
         }))
       } else if (msg.type === 'key') {
         // sendKey whitelists the key name internally and returns false for anything else
+        if (!paneTarget) {
+          ws.send(JSON.stringify({ type: 'keySent', success: false, error: 'No active pane target', key: msg.key }))
+          return
+        }
         const success = tmuxBridge.sendKey(msg.key, paneTarget)
         ws.send(JSON.stringify({
           type: 'keySent',
@@ -280,6 +313,7 @@ wss.on('connection', (ws: WebSocket) => {
           type: 'paneList',
           panes
         }))
+        if (!paneTarget) return
         // Send output for active pane
         ws.send(JSON.stringify({
           type: 'output',
@@ -290,6 +324,7 @@ wss.on('connection', (ws: WebSocket) => {
       } else if (msg.type === 'resize') {
         const cols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
         if (!Number.isInteger(cols) || cols <= 0 || cols > 1000) return
+        if (!paneTarget) return
         const success = tmuxBridge.resizePane(cols, undefined, paneTarget)
         if (success) {
           // After resize, send updated output
