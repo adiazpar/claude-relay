@@ -1521,7 +1521,7 @@
 
     // Handle pane list from server
     function handlePaneList(panes) {
-      allPanes = panes || [];
+      allPanes = (panes || []).slice().sort((a, b) => a.windowIndex - b.windowIndex);
 
       // Create state for any new panes
       for (const pane of allPanes) {
@@ -1859,14 +1859,10 @@
     // Create a new window
     async function createNewWindow() {
       try {
-        // Get current pane's cwd to use as default for new window
-        const currentState = paneStates.get(activePaneId);
-        const cwd = currentState?.cwd || undefined;
-
         const res = await fetch('/api/panes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cwd })
+          body: JSON.stringify({ cwd: '/' })
         });
         const data = await res.json();
 
@@ -1905,6 +1901,7 @@
       paneTabs.querySelectorAll('.pane-tab').forEach(t => {
         if (t.dataset.paneId === paneId) {
           t.classList.add('active');
+          t.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
         } else {
           t.classList.remove('active');
         }

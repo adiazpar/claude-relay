@@ -72,6 +72,7 @@ export class TmuxBridge extends EventEmitter {
           height: parseInt(height, 10)
         }
       })
+      .sort((a, b) => a.windowIndex - b.windowIndex)
 
       this.cachedPanes = panes
       return panes
@@ -92,22 +93,23 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Create a new window in the session
-  createWindow(cwd?: string): PaneInfo | null {
+  createWindow(cwd = '/'): PaneInfo | null {
     if (!this.sessionExists()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return null
     }
 
     try {
-      const args = ['new-window', '-t', TMUX_SESSION]
-      if (cwd) {
-        args.push('-c', cwd)
-      }
+      const panes = this.listPanes()
+      const nextIndex = panes.length > 0
+        ? Math.max(...panes.map(pane => pane.windowIndex)) + 1
+        : 0
+      const args = ['new-window', '-t', `${TMUX_SESSION}:${nextIndex}`, '-c', cwd]
       this.runTmux(args)
 
-      // Get the updated pane list and return the new window (last one)
-      const panes = this.listPanes()
-      return panes[panes.length - 1] || null
+      // Get the updated pane list and return the new rightmost window
+      const updatedPanes = this.listPanes()
+      return updatedPanes.find(pane => pane.windowIndex === nextIndex) || updatedPanes[updatedPanes.length - 1] || null
     } catch (error) {
       console.error('Failed to create window:', error)
       return null
