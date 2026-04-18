@@ -399,14 +399,14 @@
       color: #e6edf3;
       -webkit-overflow-scrolling: touch;
       position: relative;
-      padding-top: 60px; /* Space for fixed header - adjusted by JS when tabs visible */
+      padding-top: 76px; /* 60px header + 16px gap (matches CONTENT_GAP) */
       /* padding-bottom is set dynamically by JS based on input area height */
       touch-action: pan-y; /* Allow vertical scroll only in this container */
       overscroll-behavior: contain; /* Prevent scroll chaining to parent */
     }
 
     .output-container.with-tabs {
-      padding-top: 104px; /* 60px header + 44px tabs */
+      padding-top: 120px; /* 60px header + 44px tabs + 16px gap */
     }
 
     .output-container::-webkit-scrollbar {
@@ -1067,8 +1067,30 @@
             i = j + 1;
             continue;
           }
-          // Skip other escape sequences
+          // Skip other CSI sequences
           i = j + 1;
+          continue;
+        }
+
+        // OSC sequences: ESC ] ... ST. Claude emits OSC 8 hyperlinks around
+        // file paths (ESC ] 8 ; id=x ; file:///... ST LABEL ESC ] 8 ; ; ST)
+        // and without stripping them the URI payload and ST bytes leak into
+        // the rendered output. Terminator is BEL (0x07) or ST (ESC \).
+        if (text[i] === '\x1b' && text[i+1] === ']') {
+          let j = i + 2;
+          while (j < text.length) {
+            if (text[j] === '\x07') { j++; break; }
+            if (text[j] === '\x1b' && text[j+1] === '\\') { j += 2; break; }
+            j++;
+          }
+          i = j;
+          continue;
+        }
+
+        // Any other lone escape — skip the ESC and the following byte so a
+        // stray C1/charset sequence doesn't render as a box glyph.
+        if (text[i] === '\x1b') {
+          i += 2;
           continue;
         }
 
