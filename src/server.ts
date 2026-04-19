@@ -1,28 +1,86 @@
 import express from 'express'
 import { createServer } from 'http'
-import { createServer as createHttpsServer } from 'https'
-import { readFileSync, existsSync } from 'fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import fs from 'fs'
 import { tmuxBridge } from './tmux-bridge.js'
 import { getAllCommands } from './commands.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
+// Debug logging (gated on DEBUG=1 env var). When enabled, tees
+// console.log/error/warn into a rotating file at logs/debug.log
+// inside the repo. Rotation: on each write, if the current file
+// exceeds 1 MB, rename it to debug.log.1 (overwriting any previous
+// .1) and open a fresh file. Errors never crash the relay — we
+// fall back to unwrapped console output.
+if (process.env.DEBUG === '1') {
+  try {
+    const logDir = path.join(__dirname, '..', 'logs')
+    const logPath = path.join(logDir, 'debug.log')
+    const rotatedPath = path.join(logDir, 'debug.log.1')
+    const MAX_LOG_BYTES = 1 * 1024 * 1024
+
+    fs.mkdirSync(logDir, { recursive: true })
+
+    let fd: number | null = null
+
+    const openFd = () => {
+      try {
+        fd = fs.openSync(logPath, 'a')
+      } catch {
+        fd = null
+      }
+    }
+
+    const maybeRotate = () => {
+      if (fd === null) return
+      try {
+        const stat = fs.fstatSync(fd)
+        if (stat.size < MAX_LOG_BYTES) return
+        fs.closeSync(fd)
+        fs.renameSync(logPath, rotatedPath)
+        openFd()
+      } catch {
+        // Rotation failed — best effort. Keep the current fd.
+      }
+    }
+
+    openFd()
+
+    const writeLine = (prefix: string, args: unknown[]) => {
+      if (fd === null) return
+      try {
+        const stamp = new Date().toISOString()
+        const line = `${stamp} ${prefix} ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}\n`
+        fs.writeSync(fd, line)
+        maybeRotate()
+      } catch {
+        // Write failed — no-op.
+      }
+    }
+
+    const origLog = console.log.bind(console)
+    const origErr = console.error.bind(console)
+    const origWarn = console.warn.bind(console)
+
+    console.log = (...args: unknown[]) => { origLog(...args); writeLine('LOG', args) }
+    console.error = (...args: unknown[]) => { origErr(...args); writeLine('ERR', args) }
+    console.warn = (...args: unknown[]) => { origWarn(...args); writeLine('WRN', args) }
+
+    origLog(`Debug logging enabled → ${logPath}`)
+  } catch (err) {
+    // Never crash the relay due to logging setup failure.
+    console.error('Debug logging setup failed (continuing without file logs):', err)
+  }
+}
+
 // Max inbound WebSocket message size (bytes)
 const MAX_WS_MESSAGE_BYTES = 64 * 1024
 // Max inbound message content length (characters)
 const MAX_MESSAGE_CONTENT_CHARS = 16 * 1024
-
-// SSL certificate paths - check both project root and dist parent
-const certsInCurrentDir = path.join(__dirname, 'certs')
-const certsInParentDir = path.join(__dirname, '..', 'certs')
-const certsDir = existsSync(certsInCurrentDir) ? certsInCurrentDir : certsInParentDir
-const certPath = path.join(certsDir, 'cert.pem')
-const keyPath = path.join(certsDir, 'key.pem')
-const sslAvailable = existsSync(certPath) && existsSync(keyPath)
 
 // Split terminal output into raw ANSI lines
 // Client handles ANSI-to-HTML conversion for better performance
@@ -56,20 +114,10 @@ function validateCwd(cwd: unknown): string | null {
 
 const app = express()
 
-// Create HTTP server
 const httpServer = createServer(app)
 
-// Create HTTPS server if certificates are available
-const httpsServer = sslAvailable
-  ? createHttpsServer({
-      key: readFileSync(keyPath),
-      cert: readFileSync(certPath)
-    }, app)
-  : null
-
-// WebSocket server - attach to HTTPS if available, otherwise HTTP
 const wss = new WebSocketServer({
-  server: httpsServer || httpServer,
+  server: httpServer,
   maxPayload: MAX_WS_MESSAGE_BYTES
 })
 
@@ -83,7 +131,7 @@ function serializePanes() {
 }
 
 // Serve static files
-app.use(express.static(path.join(__dirname, 'public')))
+app.use(express.static(path.join(__dirname, '..', 'public')))
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
@@ -93,17 +141,6 @@ app.get('/api/health', (req, res) => {
     tmuxSession: tmuxBridge.sessionExists(),
     claudeRunning: tmuxBridge.isClaudeRunning()
   })
-})
-
-// Serve SSL certificate for iOS installation
-app.get('/cert', (req, res) => {
-  if (sslAvailable) {
-    res.setHeader('Content-Type', 'application/x-x509-ca-cert')
-    res.setHeader('Content-Disposition', 'attachment; filename="claude-relay.cer"')
-    res.sendFile(certPath)
-  } else {
-    res.status(404).send('No certificate available')
-  }
 })
 
 // Get current pane content
@@ -504,47 +541,27 @@ setInterval(() => {
 // Start polling for output changes
 tmuxBridge.startPolling()
 
-const PORT = 3001
-
-// Start HTTPS server if available, otherwise HTTP
-if (httpsServer) {
-  httpsServer.listen(PORT, HOST, () => {
-    console.log(`
-╔════════════════════════════════════════════════════════════╗
-║                    Claude Relay Server                     ║
-╠════════════════════════════════════════════════════════════╣
-║  URL: https://100.113.9.34:${PORT}                           ║
-╠════════════════════════════════════════════════════════════╣
-║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
-║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
-║  Voice Input:  Enabled                                     ║
-╚════════════════════════════════════════════════════════════╝
-`)
-  })
-} else {
-  httpServer.listen(PORT, HOST, () => {
-    console.log(`
-╔════════════════════════════════════════════════════════════╗
-║                    Claude Relay Server                     ║
-╠════════════════════════════════════════════════════════════╣
-║  URL: http://100.113.9.34:${PORT}                            ║
-╠════════════════════════════════════════════════════════════╣
-║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
-║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
-║  Voice Input:  Disabled (no SSL certs)                     ║
-╚════════════════════════════════════════════════════════════╝
-`)
-  })
+const PORT_RAW = process.env.PORT ?? '3001'
+const PORT = Number(PORT_RAW)
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`Invalid PORT: ${JSON.stringify(PORT_RAW)}. Expected an integer 1-65535.`)
+  process.exit(1)
 }
+
+httpServer.listen(PORT, HOST, () => {
+  console.log(`
+  Claude Relay Server
+  ------------------------------------------------------------
+  Listening on http://${HOST}:${PORT}
+  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}
+  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}
+`)
+})
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...')
   tmuxBridge.stopPolling()
-  if (httpsServer) {
-    httpsServer.close()
-  } else {
-    httpServer.close()
-  }
+  httpServer.close()
   process.exit(0)
 })

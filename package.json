@@ -1,16 +1,13 @@
 {
   "name": "claude-relay",
   "version": "1.0.0",
-  "description": "Web relay for Claude Code - enables mobile access with autocorrect",
+  "description": "Web relay for Claude Code — drive parallel tmux sessions from your phone.",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch server.ts",
-    "start": "tsx server.ts",
-    "build": "tsc",
-    "serve": "node dist/server.js"
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts"
   },
   "dependencies": {
-    "ansi-to-html": "^0.7.2",
     "express": "^4.18.2",
     "ws": "^8.16.0"
   },
@@ -22,6 +19,6 @@
     "typescript": "^5.3.3"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }

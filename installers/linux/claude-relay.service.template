@@ -1,0 +1,23 @@
+[Unit]
+Description=Claude Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash {{REPO}}/scripts/serve.sh
+WorkingDirectory={{REPO}}
+Restart=always
+RestartSec=10
+StandardOutput=null
+StandardError=null
+Environment="PATH={{PATH}}"
+Environment="HOME={{HOME}}"
+Environment="LANG=en_US.UTF-8"
+Environment="TERM=xterm-256color"
+Environment="PORT={{PORT}}"
+Environment="TMUX_SESSION={{SESSION}}"
+Environment="DEBUG={{DEBUG}}"
+
+[Install]
+WantedBy=default.target
