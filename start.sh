@@ -23,14 +23,14 @@ echo ""
 if lsof -nP -iTCP:"$RELAY_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Port $RELAY_PORT is already in use - claude-relay is likely already running."
     echo ""
-    echo "If the LaunchAgent is managing it:"
-    echo "    tail -f \$HOME/Library/Logs/claude-relay.log"
+    echo "To check the daemon's state:"
+    echo "    launchctl print gui/\$(id -u)/com.claude-relay"
     echo ""
     echo "To stop the daemon so you can run ./start.sh in the foreground:"
     echo "    launchctl unload \$HOME/Library/LaunchAgents/com.claude-relay.plist"
     echo ""
     echo "To remove the LaunchAgent entirely:"
-    echo "    ./launchd/uninstall.sh"
+    echo "    ./uninstall.sh"
     exit 1
 fi
 

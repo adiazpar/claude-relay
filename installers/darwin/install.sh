@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 TEMPLATE="$(dirname "$0")/com.claude-relay.plist.template"
 PLIST_DEST="$HOME/Library/LaunchAgents/com.claude-relay.plist"
 LABEL="com.claude-relay"
