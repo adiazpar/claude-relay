@@ -473,17 +473,20 @@ setInterval(() => {
 // Start polling for output changes
 tmuxBridge.startPolling()
 
-const PORT = parseInt(process.env.PORT || '3001', 10)
+const PORT_RAW = process.env.PORT ?? '3001'
+const PORT = Number(PORT_RAW)
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error(`Invalid PORT: ${JSON.stringify(PORT_RAW)}. Expected an integer 1-65535.`)
+  process.exit(1)
+}
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`
-╔════════════════════════════════════════════════════════════╗
-║                    Claude Relay Server                     ║
-╠════════════════════════════════════════════════════════════╣
-║  Listening on http://${HOST}:${PORT}
-║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}
-║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}
-╚════════════════════════════════════════════════════════════╝
+  Claude Relay Server
+  ------------------------------------------------------------
+  Listening on http://${HOST}:${PORT}
+  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}
+  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}
 `)
 })
 
