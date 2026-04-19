@@ -127,22 +127,22 @@ case "$OS" in
       "$REPO/installers/darwin/install.sh"
     ;;
   Linux)
-    die "Linux installer is in development. Use a macOS target for now, or wait for the Task 8 commit."
+    die "Linux installer is not yet available in this build. macOS only for now; Linux support is in progress."
     ;;
 esac
 
 # -------- Health check --------
 say ""
 say "Waiting for daemon to bind to port $PORT..."
-for i in $(seq 1 20); do
+for i in $(seq 1 30); do
   if curl -sI "http://127.0.0.1:$PORT/api/health" 2>/dev/null | head -n 1 | grep -q "200"; then
     break
   fi
-  sleep 0.5
-  if [ "$i" = "20" ]; then
-    die "Daemon loaded but didn't bind to port $PORT within 10s.
+  if [ "$i" = "30" ]; then
+    die "Daemon loaded but didn't bind to port $PORT within 15s.
 Run ./start.sh in the foreground to see the error."
   fi
+  sleep 0.5
 done
 
 # -------- Print URL --------

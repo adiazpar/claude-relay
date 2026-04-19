@@ -16,7 +16,13 @@ say ""
 
 case "$OS" in
   Darwin) "$REPO/installers/darwin/uninstall.sh" ;;
-  Linux)  "$REPO/installers/linux/uninstall.sh" ;;
+  Linux)
+    if [ -x "$REPO/installers/linux/uninstall.sh" ]; then
+      "$REPO/installers/linux/uninstall.sh"
+    else
+      die "Linux uninstaller is not yet available in this build."
+    fi
+    ;;
   *) die "unsupported OS: $OS" ;;
 esac
 
