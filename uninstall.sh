@@ -109,12 +109,21 @@ if [ "$PURGE" = "1" ]; then
       say "About to kill tmux session '$TMUX_SESSION'."
       say "This sends SIGHUP to every process in it — Claude Code, dev servers,"
       say "your shells, everything. Unsaved work will be lost."
-      read -r -p "Kill session '$TMUX_SESSION'? [y/N] " confirm
+      if ! read -r -p "Kill session '$TMUX_SESSION'? [y/N] " confirm; then
+        # EOF on stdin (non-interactive invocation without --yes).
+        # Treat as "no" — skip the kill but continue to the summary.
+        confirm="n"
+        say ""
+        say "(no TTY — treating as 'no'; rerun with --yes for unattended purge)"
+      fi
     fi
     case "$confirm" in
       y|Y|yes|YES)
-        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-        say "Killed tmux session '$TMUX_SESSION'"
+        if tmux kill-session -t "$TMUX_SESSION" 2>/dev/null; then
+          say "Killed tmux session '$TMUX_SESSION'"
+        else
+          say "tmux session '$TMUX_SESSION' was already gone."
+        fi
         touched_tmux=1
         ;;
       *)
