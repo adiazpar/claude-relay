@@ -649,45 +649,8 @@
       cursor: not-allowed;
     }
 
-    /* Voice recording state */
-    .send-btn.recording {
-      background: #e53935;
-      animation: recording-pulse 1.2s ease-in-out infinite;
-    }
-
-    @keyframes recording-pulse {
-      0%, 100% {
-        opacity: 1;
-      }
-      50% {
-        opacity: 0.7;
-      }
-    }
-
-    .send-btn .icon-send,
-    .send-btn .icon-mic {
-      position: absolute;
-      transition: opacity 0.15s ease, transform 0.15s ease;
-    }
-
     .send-btn .icon-send {
-      opacity: 1;
-      transform: scale(1);
-    }
-
-    .send-btn .icon-mic {
-      opacity: 0;
-      transform: scale(0.8);
-    }
-
-    .send-btn.show-mic .icon-send {
-      opacity: 0;
-      transform: scale(0.8);
-    }
-
-    .send-btn.show-mic .icon-mic {
-      opacity: 1;
-      transform: scale(1);
+      position: absolute;
     }
 
     /* Command palette button */
@@ -816,109 +779,6 @@
       font-size: 13px;
     }
 
-    /* Language action sheet */
-    .language-action-sheet {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      z-index: 200;
-      transform: translateY(100%);
-      transition: transform 0.25s ease-out;
-    }
-
-    .language-action-sheet.open {
-      transform: translateY(0);
-    }
-
-    .language-action-sheet-content {
-      background: var(--bg-secondary);
-      border-top-left-radius: 16px;
-      border-top-right-radius: 16px;
-      padding: 16px;
-      padding-bottom: calc(16px + env(safe-area-inset-bottom));
-    }
-
-    .language-action-sheet-header {
-      text-align: center;
-      padding-bottom: 12px;
-      margin-bottom: 12px;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .language-action-sheet-title {
-      font-size: 13px;
-      color: var(--text-secondary);
-      margin-bottom: 4px;
-    }
-
-    .language-action-sheet-current {
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    .language-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-height: 300px;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      -webkit-overflow-scrolling: touch;
-      touch-action: pan-y;
-    }
-
-    .language-item {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 14px 16px;
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      font-size: 15px;
-      touch-action: pan-y;
-      -webkit-user-select: none;
-      user-select: none;
-    }
-
-    .language-item:active {
-      transform: scale(0.98);
-    }
-
-    .language-item.selected {
-      border-color: var(--accent);
-      background: rgba(215, 118, 85, 0.15);
-    }
-
-    @media (hover: hover) {
-      .language-item:hover {
-        border-color: var(--accent);
-        background: rgba(215, 118, 85, 0.1);
-      }
-    }
-
-    .language-flag {
-      font-size: 20px;
-    }
-
-    .language-name {
-      color: var(--text-primary);
-      flex: 1;
-    }
-
-    .language-check {
-      color: var(--accent);
-      opacity: 0;
-    }
-
-    .language-item.selected .language-check {
-      opacity: 1;
-    }
-
   </style>
 </head>
 <body>
@@ -954,18 +814,6 @@
       <div id="tabActionOptions" class="tab-action-sheet-options">
         <!-- Options populated by JS -->
       </div>
-    </div>
-  </div>
-
-  <!-- Language action sheet -->
-  <div class="tab-action-sheet-backdrop" id="languageActionBackdrop"></div>
-  <div class="language-action-sheet" id="languageActionSheet">
-    <div class="language-action-sheet-content">
-      <div class="language-action-sheet-header">
-        <div class="language-action-sheet-title">Voice Language</div>
-        <div class="language-action-sheet-current" id="languageActionCurrent"></div>
-      </div>
-      <div class="language-list" id="languageList"></div>
     </div>
   </div>
 
@@ -1016,9 +864,8 @@
         spellcheck="true"
         data-form-type="other"
       ></textarea>
-      <button class="send-btn show-mic" id="sendBtn" onclick="handleSendButton()" aria-label="Send message">
+      <button class="send-btn" id="sendBtn" onclick="handleSendButton()" aria-label="Send message">
         <i class="icon-send" data-lucide="arrow-up"></i>
-        <i class="icon-mic" data-lucide="mic"></i>
       </button>
     </div>
   </div>
@@ -1228,7 +1075,6 @@
         this.serverCommand = null;
         this.serverPorts = [];
         this.inputText = '';
-        this.selectedLanguage = null;  // Set to languages[0] when restored
         this.allLines = [];
         this.commands = [];
         this.scrollPosition = 0;
@@ -1240,19 +1086,6 @@
     let activePaneId = null;
     let activePaneTarget = null;
     let allPanes = [];  // List of all panes from server
-
-    // ============================================
-    // PWA DETECTION
-    // ============================================
-    // Detect if running as installed PWA (standalone mode)
-    // Voice input doesn't work in iOS PWA mode due to WebKit limitations
-    const isPWA = window.matchMedia('(display-mode: standalone)').matches
-      || window.navigator.standalone === true  // iOS Safari
-      || document.referrer.includes('android-app://');
-
-    if (isPWA) {
-      console.log('Running in PWA mode - voice input disabled');
-    }
 
     // ============================================
     // OUTPUT STATE
@@ -2264,14 +2097,10 @@
       if (!state) return;
 
       state.inputText = messageInput.value;
-      state.selectedLanguage = selectedLanguage;
       state.scrollPosition = output.scrollTop;
 
       // Save to localStorage
       storage.set(STORAGE_KEYS.inputText(paneId), state.inputText);
-      if (state.selectedLanguage && state.selectedLanguage.code) {
-        storage.set(STORAGE_KEYS.language(paneId), state.selectedLanguage.code);
-      }
     }
 
     // Restore pane state
@@ -2281,24 +2110,13 @@
 
       // Restore from localStorage if available
       const savedInput = storage.get(STORAGE_KEYS.inputText(paneId));
-      const savedLang = storage.get(STORAGE_KEYS.language(paneId));
 
       if (savedInput !== null) {
         state.inputText = savedInput;
       }
-      if (savedLang) {
-        const lang = languages.find(l => l.code === savedLang);
-        if (lang) state.selectedLanguage = lang;
-      }
-
-      // Default to first language if not set
-      if (!state.selectedLanguage) {
-        state.selectedLanguage = languages[0];
-      }
 
       // Update UI
       messageInput.value = state.inputText;
-      selectedLanguage = state.selectedLanguage;
       messageInput.style.height = 'auto';
       messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
       updateButtonState();
@@ -2439,227 +2257,15 @@
         });
     }
 
-    // ============================================
-    // VOICE RECOGNITION (Web Speech API)
-    // ============================================
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    let recognition = null;
-    let isRecording = false;
-
-    // Check if speech recognition is supported
-    const speechSupported = !!SpeechRecognition;
-
-    // Available languages
-    const languages = [
-      { code: 'en-US', name: 'English', flag: '🇺🇸' },
-      { code: 'es-ES', name: 'Spanish', flag: '🇪🇸' },
-      { code: 'fr-FR', name: 'French', flag: '🇫🇷' },
-      { code: 'de-DE', name: 'German', flag: '🇩🇪' },
-      { code: 'it-IT', name: 'Italian', flag: '🇮🇹' },
-      { code: 'pt-BR', name: 'Portuguese', flag: '🇧🇷' },
-      { code: 'zh-CN', name: 'Chinese', flag: '🇨🇳' },
-      { code: 'ja-JP', name: 'Japanese', flag: '🇯🇵' },
-      { code: 'ko-KR', name: 'Korean', flag: '🇰🇷' },
-    ];
-
-    // Language action sheet state
-    const languageActionSheet = document.getElementById('languageActionSheet');
-    const languageActionBackdrop = document.getElementById('languageActionBackdrop');
-    const languageActionCurrent = document.getElementById('languageActionCurrent');
-    const languageList = document.getElementById('languageList');
-    let languageSheetOpen = false;
-    let selectedLanguage = languages[0]; // Default to English
-
-    // Render language options
-    function renderLanguages() {
-      languageActionCurrent.textContent = `${selectedLanguage.flag} ${selectedLanguage.name}`;
-      languageList.replaceChildren();
-
-      for (const lang of languages) {
-        const item = document.createElement('div');
-        item.className = 'language-item' + (lang.code === selectedLanguage.code ? ' selected' : '');
-        item.dataset.code = lang.code;
-
-        const flag = document.createElement('span');
-        flag.className = 'language-flag';
-        flag.textContent = lang.flag;
-
-        const name = document.createElement('span');
-        name.className = 'language-name';
-        name.textContent = lang.name;
-
-        const check = document.createElementNS(SVG_NS, 'svg');
-        check.setAttribute('class', 'language-check');
-        check.setAttribute('width', '20');
-        check.setAttribute('height', '20');
-        check.setAttribute('viewBox', '0 0 24 24');
-        check.setAttribute('fill', 'none');
-        check.setAttribute('stroke', 'currentColor');
-        check.setAttribute('stroke-width', '2.5');
-        check.setAttribute('stroke-linecap', 'round');
-        check.setAttribute('stroke-linejoin', 'round');
-        const poly = document.createElementNS(SVG_NS, 'polyline');
-        poly.setAttribute('points', '20 6 9 17 4 12');
-        check.appendChild(poly);
-
-        item.appendChild(flag);
-        item.appendChild(name);
-        item.appendChild(check);
-        item.addEventListener('click', () => selectLanguage(lang));
-        languageList.appendChild(item);
-      }
-    }
-
-    // Open language action sheet
-    function openLanguageSheet() {
-      if (!speechSupported) {
-        alert(`Voice input not available.\n\nIf on iOS:\n- Make sure you're in Safari (not a home screen PWA)\n- Siri must be enabled in Settings`);
-        return;
-      }
-      languageSheetOpen = true;
-      languageActionSheet.classList.add('open');
-      languageActionBackdrop.classList.add('open');
-      renderLanguages();
-    }
-
-    // Close language action sheet
-    function closeLanguageSheet() {
-      languageSheetOpen = false;
-      languageActionSheet.classList.remove('open');
-      languageActionBackdrop.classList.remove('open');
-    }
-
-    // Select language
-    function selectLanguage(lang) {
-      selectedLanguage = lang;
-      closeLanguageSheet();
-    }
-
-    // Close language sheet when clicking backdrop
-    languageActionBackdrop.addEventListener('click', closeLanguageSheet);
-
-    // Start recording in specified language
-    function startRecording(langCode) {
-      if (!speechSupported) return;
-
-      recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
-      recognition.lang = langCode;
-
-      recognition.onstart = () => {
-        isRecording = true;
-        sendBtn.classList.add('recording');
-      };
-
-      recognition.onresult = (event) => {
-        let transcript = '';
-        for (let i = 0; i < event.results.length; i++) {
-          transcript += event.results[i][0].transcript;
-        }
-        messageInput.value = transcript;
-        messageInput.dispatchEvent(new Event('input'));
-      };
-
-      recognition.onend = () => {
-        isRecording = false;
-        sendBtn.classList.remove('recording');
-        updateButtonState();
-      };
-
-      recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-        isRecording = false;
-        sendBtn.classList.remove('recording');
-        updateButtonState();
-
-        if (event.error === 'not-allowed') {
-          alert('Microphone access denied. Please enable microphone permissions in your browser settings.');
-        } else if (event.error === 'network') {
-          alert('Network error during speech recognition. Please check your connection.');
-        }
-      };
-
-      try {
-        recognition.start();
-      } catch (e) {
-        console.error('Failed to start recognition:', e);
-        alert('Could not start voice input. Please try again.');
-      }
-    }
-
-
-    // Update button to show mic or send icon based on input state
-    // In PWA mode, always show send icon (voice doesn't work in iOS PWA)
-    function updateButtonState() {
-      const hasText = messageInput.value.trim().length > 0;
-      if (hasText || isPWA) {
-        sendBtn.classList.remove('show-mic');
-        sendBtn.setAttribute('aria-label', 'Send message');
-      } else {
-        sendBtn.classList.add('show-mic');
-        sendBtn.setAttribute('aria-label', 'Voice input');
-      }
-    }
-
-    // Long-press detection for mic button (disabled in PWA mode)
-    let longPressTimer = null;
-    let isLongPress = false;
-    const LONG_PRESS_DURATION = 400; // ms
-
-    sendBtn.addEventListener('touchstart', (e) => {
-      // Skip voice features in PWA mode
-      if (isPWA) return;
-      // Allow long-press for language selection when not recording and no text
-      if (isRecording || messageInput.value.trim().length > 0) return;
-      isLongPress = false;
-      longPressTimer = setTimeout(() => {
-        isLongPress = true;
-        triggerHaptic();
-        openLanguageSheet();
-      }, LONG_PRESS_DURATION);
-    }, { passive: true });
-
-    sendBtn.addEventListener('touchend', (e) => {
-      clearTimeout(longPressTimer);
-
-      // Skip voice features in PWA mode
-      if (isPWA) return;
-
-      // If recording, always allow stopping
-      if (isRecording && recognition) {
-        e.preventDefault();
-        recognition.stop();
-        return;
-      }
-
-      // If has text and not recording, let click handler send
-      if (messageInput.value.trim().length > 0) return;
-
-      // No text, not recording
-      if (!isLongPress) {
-        e.preventDefault();
-        if (languageSheetOpen) {
-          closeLanguageSheet();
-        } else {
-          startRecording(selectedLanguage.code);
-        }
-      }
-    });
-
-    sendBtn.addEventListener('touchcancel', () => {
-      clearTimeout(longPressTimer);
-    });
-
-    // Handle send button click (for desktop and send mode)
+    // Handle send button click
     function handleSendButton() {
-      const hasText = messageInput.value.trim().length > 0;
-
-      if (hasText) {
+      if (messageInput.value.trim().length > 0) {
         sendMessage();
       }
-      // Touch events handle mic interactions on mobile
+    }
+
+    function updateButtonState() {
+      // No-op: send button is always in send mode now
     }
 
     // ============================================
@@ -2800,11 +2406,6 @@
         return;
       }
 
-      // Allow scrolling in language list
-      if (languageList.contains(e.target)) {
-        return;
-      }
-
       // Allow scrolling in textarea if it has overflow
       if (e.target === messageInput && messageInput.scrollHeight > messageInput.clientHeight) {
         return;
@@ -2876,13 +2477,12 @@
     const STORAGE_KEYS = {
       // Per-pane keys
       inputText: (paneId) => `claude-relay-input-${paneId}`,
-      language: (paneId) => `claude-relay-language-${paneId}`,
       tabName: (paneId) => `claude-relay-tabname-${paneId}`,
       // Global keys
       activePane: 'claude-relay-active-pane'
     };
 
-    // Note: Input text and language are now restored per-pane in restorePaneState()
+    // Note: Input text is now restored per-pane in restorePaneState()
     // The initial restore happens after paneList is received from server
 
     // Save input text on change (debounced) - now per-pane
@@ -2914,21 +2514,9 @@
       originalSendMessage();
     };
 
-    // Save language when changed - now per-pane
-    const originalSelectLanguage = selectLanguage;
-    selectLanguage = function(lang) {
-      if (activePaneId) {
-        storage.set(STORAGE_KEYS.language(activePaneId), lang.code);
-        const state = paneStates.get(activePaneId);
-        if (state) state.selectedLanguage = lang;
-      }
-      originalSelectLanguage(lang);
-    };
-
     // ============================================
     // START
     // ============================================
-    // Initialize button state (show mic if no text)
     updateButtonState();
 
     // Immediately fetch everything via REST - don't wait for WebSocket
