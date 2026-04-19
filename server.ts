@@ -3,11 +3,80 @@ import { createServer } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import os from 'os'
+import fs from 'fs'
 import { tmuxBridge } from './tmux-bridge.js'
 import { getAllCommands } from './commands.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
+// Debug logging (gated on DEBUG=1 env var). When enabled, tees
+// console.log/error/warn into a rotating file at
+// ~/.cache/claude-relay/debug.log. Rotation: on each write, if the
+// current file exceeds 1 MB, rename it to debug.log.1 (overwriting any
+// previous .1) and open a fresh file. Errors never crash the relay —
+// we fall back to unwrapped console output.
+if (process.env.DEBUG === '1') {
+  try {
+    const logDir = path.join(os.homedir(), '.cache', 'claude-relay')
+    const logPath = path.join(logDir, 'debug.log')
+    const rotatedPath = path.join(logDir, 'debug.log.1')
+    const MAX_LOG_BYTES = 1 * 1024 * 1024
+
+    fs.mkdirSync(logDir, { recursive: true })
+
+    let fd: number | null = null
+
+    const openFd = () => {
+      try {
+        fd = fs.openSync(logPath, 'a')
+      } catch {
+        fd = null
+      }
+    }
+
+    const maybeRotate = () => {
+      if (fd === null) return
+      try {
+        const stat = fs.fstatSync(fd)
+        if (stat.size < MAX_LOG_BYTES) return
+        fs.closeSync(fd)
+        fs.renameSync(logPath, rotatedPath)
+        openFd()
+      } catch {
+        // Rotation failed — best effort. Keep the current fd.
+      }
+    }
+
+    openFd()
+
+    const writeLine = (prefix: string, args: unknown[]) => {
+      if (fd === null) return
+      try {
+        const stamp = new Date().toISOString()
+        const line = `${stamp} ${prefix} ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}\n`
+        fs.writeSync(fd, line)
+        maybeRotate()
+      } catch {
+        // Write failed — no-op.
+      }
+    }
+
+    const origLog = console.log.bind(console)
+    const origErr = console.error.bind(console)
+    const origWarn = console.warn.bind(console)
+
+    console.log = (...args: unknown[]) => { origLog(...args); writeLine('LOG', args) }
+    console.error = (...args: unknown[]) => { origErr(...args); writeLine('ERR', args) }
+    console.warn = (...args: unknown[]) => { origWarn(...args); writeLine('WRN', args) }
+
+    origLog(`Debug logging enabled → ${logPath}`)
+  } catch (err) {
+    // Never crash the relay due to logging setup failure.
+    console.error('Debug logging setup failed (continuing without file logs):', err)
+  }
+}
 
 // Max inbound WebSocket message size (bytes)
 const MAX_WS_MESSAGE_BYTES = 64 * 1024
