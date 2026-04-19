@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename)
 // fall back to unwrapped console output.
 if (process.env.DEBUG === '1') {
   try {
-    const logDir = path.join(__dirname, 'logs')
+    const logDir = path.join(__dirname, '..', 'logs')
     const logPath = path.join(logDir, 'debug.log')
     const rotatedPath = path.join(logDir, 'debug.log.1')
     const MAX_LOG_BYTES = 1 * 1024 * 1024
@@ -131,7 +131,7 @@ function serializePanes() {
 }
 
 // Serve static files
-app.use(express.static(path.join(__dirname, 'public')))
+app.use(express.static(path.join(__dirname, '..', 'public')))
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
