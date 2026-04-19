@@ -127,7 +127,8 @@ case "$OS" in
       "$REPO/installers/darwin/install.sh"
     ;;
   Linux)
-    die "Linux installer is not yet available in this build. macOS only for now; Linux support is in progress."
+    PORT="$PORT" TMUX_SESSION="$TMUX_SESSION" DEBUG="$DEBUG" \
+      "$REPO/installers/linux/install.sh"
     ;;
 esac
 
