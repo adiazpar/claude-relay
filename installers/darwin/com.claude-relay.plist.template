@@ -47,13 +47,15 @@
     <string>{{DEBUG}}</string>
   </dict>
 
-  <!-- No log files by default. Set DEBUG=1 in the install environment
-       (e.g., DEBUG=1 ./install.sh) to enable node-level rotating log
-       file at ~/.cache/claude-relay/debug.log. -->
+  <!-- Capture stdout/stderr to the repo so first-boot crashes are
+       diagnosable. On a healthy daemon these stay effectively empty.
+       Set DEBUG=1 in the install environment (DEBUG=1 ./install.sh) to
+       additionally enable node's rotating app log at
+       {{REPO}}/logs/debug.log. -->
   <key>StandardOutPath</key>
-  <string>/dev/null</string>
+  <string>{{REPO}}/logs/launchd.out</string>
 
   <key>StandardErrorPath</key>
-  <string>/dev/null</string>
+  <string>{{REPO}}/logs/launchd.err</string>
 </dict>
 </plist>

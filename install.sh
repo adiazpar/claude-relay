@@ -140,8 +140,26 @@ for i in $(seq 1 30); do
     break
   fi
   if [ "$i" = "30" ]; then
-    die "Daemon loaded but didn't bind to port $PORT within 15s.
-Run ./start.sh in the foreground to see the error."
+    say ""
+    say "error: Daemon loaded but didn't bind to port $PORT within 15s."
+    case "$OS" in
+      Darwin)
+        if [ -s "$REPO/logs/launchd.err" ]; then
+          say ""
+          say "Last 20 lines from $REPO/logs/launchd.err:"
+          say "------------------------------------------------------------"
+          tail -n 20 "$REPO/logs/launchd.err"
+          say "------------------------------------------------------------"
+        else
+          say "No launchd stderr captured — run ./start.sh in the foreground to see the error."
+        fi
+        ;;
+      Linux)
+        say ""
+        say "Check the systemd journal: journalctl --user -u claude-relay -n 20"
+        ;;
+    esac
+    exit 1
   fi
   sleep 0.5
 done

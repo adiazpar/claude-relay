@@ -3,7 +3,6 @@ import { createServer } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import os from 'os'
 import fs from 'fs'
 import { tmuxBridge } from './tmux-bridge.js'
 import { getAllCommands } from './commands.js'
@@ -12,14 +11,14 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // Debug logging (gated on DEBUG=1 env var). When enabled, tees
-// console.log/error/warn into a rotating file at
-// ~/.cache/claude-relay/debug.log. Rotation: on each write, if the
-// current file exceeds 1 MB, rename it to debug.log.1 (overwriting any
-// previous .1) and open a fresh file. Errors never crash the relay —
-// we fall back to unwrapped console output.
+// console.log/error/warn into a rotating file at logs/debug.log
+// inside the repo. Rotation: on each write, if the current file
+// exceeds 1 MB, rename it to debug.log.1 (overwriting any previous
+// .1) and open a fresh file. Errors never crash the relay — we
+// fall back to unwrapped console output.
 if (process.env.DEBUG === '1') {
   try {
-    const logDir = path.join(os.homedir(), '.cache', 'claude-relay')
+    const logDir = path.join(__dirname, 'logs')
     const logPath = path.join(logDir, 'debug.log')
     const rotatedPath = path.join(logDir, 'debug.log.1')
     const MAX_LOG_BYTES = 1 * 1024 * 1024

@@ -30,4 +30,5 @@ Thumbs.db
 # Per-user state, docs, logs
 .claude/
 docs/
+logs/
 *.log

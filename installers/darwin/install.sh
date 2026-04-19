@@ -10,6 +10,7 @@ PLIST_DEST="$HOME/Library/LaunchAgents/com.claude-relay.plist"
 LABEL="com.claude-relay"
 
 mkdir -p "$HOME/Library/LaunchAgents"
+mkdir -p "$REPO/logs"
 
 PORT="${PORT:-3001}"
 SESSION="${TMUX_SESSION:-dev}"

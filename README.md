@@ -115,13 +115,15 @@ Configuration via env vars (all optional):
 
 - `PORT` — default 3001.
 - `TMUX_SESSION` — default "dev". The tmux session name the relay binds to.
-- `DEBUG=1` — enable debug logging to `~/.cache/claude-relay/debug.log`
-  (1 MB rotation, one previous file kept). Default off — zero disk writes.
+- `DEBUG=1` — enable the in-process rotating app log at `./logs/debug.log`
+  (1 MB rotation, one previous file kept). Default off. Note: crash
+  stderr from the launchd service is always captured to
+  `./logs/launchd.err` regardless of DEBUG — stays ~empty when healthy.
 - `VERBOSE=1` — show full output from noisy sub-commands like `npm install`.
 
 ## Uninstall
 
-    ./uninstall.sh               # remove service registration + debug logs
+    ./uninstall.sh               # remove service registration + logs
     ./uninstall.sh --dry-run     # show what would be removed, touch nothing
     ./uninstall.sh --purge       # also kill the tmux session (prompts first)
     ./uninstall.sh --purge --yes # unattended: purge without prompt
@@ -132,6 +134,11 @@ Uninstall leaves alone:
 - `node_modules/` inside this repo — delete the repo clone to remove.
 - Claude Code CLI — not installed by claude-relay.
 - Tailscale — not installed by claude-relay.
+
+All relay-owned state lives in the repo clone (`logs/`, `node_modules/`)
+plus the service registration. So after `./uninstall.sh`, a plain
+`rm -rf claude-relay` of the cloned directory completes the wipe — no
+state is left scattered under `~/.cache` or `~/Library`.
 
 ## Usage
 
@@ -181,9 +188,10 @@ meaningful second project; tracked but unscheduled.)
   see the error live. Most common cause: tmux or node isn't on the
   service's PATH.
 - **Claude session doesn't respond to input**: make sure `claude` is
-  installed (`claude --version`). If you installed with `DEBUG=1`, tail
-  `~/.cache/claude-relay/debug.log`. Otherwise run `./start.sh` in
-  foreground to see output.
+  installed (`claude --version`). Check `./logs/launchd.err` first for
+  the service's own crash trail. If you installed with `DEBUG=1`, also
+  tail `./logs/debug.log`. Otherwise run `./start.sh` in foreground to
+  see output.
 - **Service won't start at all**: on Linux, `journalctl --user -u
   claude-relay` shows lifecycle errors regardless of DEBUG. On macOS,
   open Console.app and filter for "com.claude-relay".

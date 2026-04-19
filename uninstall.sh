@@ -78,15 +78,31 @@ run_delegate() {
 
 run_delegate
 
-# --- Debug log cleanup ---
+# --- Log cleanup ---
 touched_logs=0
+
+# In-repo logs/ dir: launchd.{out,err} captured by the service manager
+# plus debug.log[.1] if DEBUG=1 was set at install time.
+if [ -d "$REPO/logs" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    say "Would remove: $REPO/logs/"
+  else
+    rm -rf "$REPO/logs"
+    say "Removed: $REPO/logs/"
+    touched_logs=1
+  fi
+fi
+
+# Legacy location from an earlier build that wrote debug.log under
+# ~/.cache/. Silently clean up if present so upgraders don't leave
+# orphans behind.
 if [ -d "$HOME/.cache/claude-relay" ]; then
   if [ "$DRY_RUN" = "1" ]; then
-    say "Would remove: $HOME/.cache/claude-relay/ (debug logs)"
+    say "Would remove: $HOME/.cache/claude-relay/ (legacy location)"
   else
     rm -f "$HOME/.cache/claude-relay/debug.log"*
     rmdir "$HOME/.cache/claude-relay" 2>/dev/null || true
-    say "Removed: $HOME/.cache/claude-relay/ (debug logs)"
+    say "Removed: $HOME/.cache/claude-relay/ (legacy location)"
     touched_logs=1
   fi
 fi
