@@ -34,19 +34,26 @@
     <string>{{HOME}}</string>
     <!-- Without a UTF-8 locale, tmux falls back to a "safe" mode that
          rewrites control characters (including tabs) to '_' in format
-         output. Our list-windows parser uses tab as the field separator,
-         so without this tmuxBridge.listPanes returns []. TERM is also
-         set as a belt-and-suspenders for any other TUI interaction. -->
+         output, which breaks our list-windows parser. Load-bearing. -->
     <key>LANG</key>
     <string>en_US.UTF-8</string>
     <key>TERM</key>
     <string>xterm-256color</string>
+    <key>PORT</key>
+    <string>{{PORT}}</string>
+    <key>TMUX_SESSION</key>
+    <string>{{SESSION}}</string>
+    <key>DEBUG</key>
+    <string>{{DEBUG}}</string>
   </dict>
 
+  <!-- No log files by default. Set DEBUG=1 via --debug at install
+       time to enable node-level rotating log file at
+       ~/.cache/claude-relay/debug.log (see spec §5.4). -->
   <key>StandardOutPath</key>
-  <string>{{HOME}}/Library/Logs/claude-relay.log</string>
+  <string>/dev/null</string>
 
   <key>StandardErrorPath</key>
-  <string>{{HOME}}/Library/Logs/claude-relay.log</string>
+  <string>/dev/null</string>
 </dict>
 </plist>
