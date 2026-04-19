@@ -44,15 +44,30 @@ sed -e "s|{{HOME}}|$HOME|g" \
     "$TEMPLATE" > "$UNIT"
 
 # --- 5. Reload systemd and start ---
-systemctl --user daemon-reload
+if ! systemctl --user daemon-reload 2>/dev/null; then
+  echo "error: systemctl --user daemon-reload failed." >&2
+  echo "If this is a fresh SSH login on a minimal server, the user bus may not be running." >&2
+  echo "Try: loginctl enable-linger $USER  (then log out and log back in and re-run ./install.sh)" >&2
+  exit 1
+fi
 systemctl --user enable --now claude-relay.service
 
 # --- 6. Linger (survive SSH logout / reboot) ---
-linger_state="$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || echo no)"
-if [ "$linger_state" != "yes" ]; then
+# On systemd < v230, `--value` is unsupported and `show-user` emits
+# "Linger=no" instead of just "no". Strip the prefix defensively so
+# the comparison below works on both old and new systemd.
+linger_raw="$(loginctl show-user "$USER" --property=Linger 2>/dev/null | sed 's/^Linger=//' || echo no)"
+if [ "$linger_raw" != "yes" ]; then
   loginctl enable-linger "$USER"
   touch "$STATE_DIR/.enabled-linger"
   echo "Enabled loginctl linger so the relay survives SSH disconnect."
+else
+  # Pre-existing linger: claude-relay does not own this state.
+  # Clear any stale marker from a prior install (when Linger was
+  # still 'no'). Without this, uninstall would mistakenly disable
+  # the user's manually-set linger.
+  rm -f "$STATE_DIR/.enabled-linger"
+  echo "loginctl linger already enabled; leaving as-is."
 fi
 
 echo "systemd user service installed: $UNIT"
