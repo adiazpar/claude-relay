@@ -132,7 +132,25 @@ Uninstall leaves alone:
 - Claude Code CLI — not installed by claude-relay.
 - Tailscale — not installed by claude-relay.
 
-## How it works (short version)
+## Usage
+
+After install, open the printed URL on your phone. The tabs across the
+top are your tmux windows — tap one to switch to it. Typing in the
+input area sends to whichever tab is active; the text you see above
+is the live pane content.
+
+Run `claude` inside any pane to start a Claude Code session. Start a
+dev server in another pane and the input area swaps for tappable port
+chips — one tap opens the server's URL in a new browser tab. Stop and
+Restart buttons let you bounce a detected server without typing
+Ctrl-C.
+
+The relay keeps running via launchd (macOS) or systemd (Linux) — your
+tmux session (and everything in it) survives phone disconnects, relay
+crashes, and reboots. If you close the phone browser and come back
+hours later, everything is where you left it.
+
+## How it works
 
 - **tmux** is a separate daemon that holds your sessions and panes.
   Claude Code runs inside a tmux pane. If the relay process dies,
@@ -171,6 +189,6 @@ meaningful second project; tracked but unscheduled.)
 
 ## License
 
-License choice TBD by the repository author before publication. MIT,
-Apache-2.0, and BSD-3-Clause are all conventional choices for Node
-tooling.
+The author will pick a license before the first public release —
+MIT, Apache-2.0, and BSD-3-Clause are all conventional choices for
+Node tooling. Until then, no license is attached.
