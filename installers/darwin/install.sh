@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install the claude-relay LaunchAgent so the relay restarts automatically
 # whenever the node process exits (crash, kill, reboot).
 

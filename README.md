@@ -94,7 +94,8 @@ different mesh VPN (ZeroTier, Nebula, Netbird) or tunneling tool
 
 ## Install
 
-    git clone https://github.com/<user>/claude-relay
+    git clone https://github.com/YOUR_USERNAME/claude-relay.git
+    # Replace YOUR_USERNAME with the fork/mirror you trust.
     cd claude-relay
     ./install.sh
 
