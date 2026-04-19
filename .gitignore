@@ -1,14 +1,33 @@
+# Dependencies
 node_modules/
+
+# Build artifacts
 dist/
-certs/
 *.js
 *.js.map
 *.d.ts
+*.tsbuildinfo
 !public/*.js
-.DS_Store
-.claude/
-.env
-.env.*
-*.log
+
+# Secrets / certs
+certs/
 *.pem
 *.key
+.env
+.env.*
+
+# Editor / IDE (individual preference, not shared)
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Per-user state, docs, logs
+.claude/
+docs/
+*.log
