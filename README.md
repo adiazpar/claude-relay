@@ -16,7 +16,7 @@ not just a chat window.
   the chat input swaps for tappable port chips. One tap opens the dev
   server's URL in a new tab.
 - **Stop/Restart** detected servers from the mobile UI. Preserves your
-  exact invocation (`npm run dev`, `./start.sh`, whatever you typed).
+  exact invocation (`npm run dev`, `python app.py`, whatever you typed).
 - **Self-healing**: the LaunchAgent (macOS) or systemd user service
   (Linux) restarts the relay on crash. If tmux itself dies, the next
   500ms poll creates a fresh session and the phone reconnects.
