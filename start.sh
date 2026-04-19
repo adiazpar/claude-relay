@@ -15,38 +15,41 @@ echo "     Claude Relay Starter"
 echo "=================================="
 echo ""
 
-# Check if tmux session exists
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    echo "ERROR: Tmux session '$TMUX_SESSION' not found!"
+# Refuse to start if the port is already bound — almost always means the
+# LaunchAgent is already running the relay as a daemon and the user meant
+# to tail its log rather than spawn a second instance that would collide.
+# Checking the actual port (rather than the LaunchAgent label) also covers
+# the "another start.sh is already running in a different terminal" case.
+if lsof -nP -iTCP:"$RELAY_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port $RELAY_PORT is already in use - claude-relay is likely already running."
     echo ""
-    echo "To set up Claude Code in tmux:"
+    echo "If the LaunchAgent is managing it:"
+    echo "    tail -f \$HOME/Library/Logs/claude-relay.log"
     echo ""
-    echo "  1. Create a new tmux session:"
-    echo "     tmux new -s $TMUX_SESSION"
+    echo "To stop the daemon so you can run ./start.sh in the foreground:"
+    echo "    launchctl unload \$HOME/Library/LaunchAgents/com.claude-relay.plist"
     echo ""
-    echo "  2. Navigate to your project:"
-    echo "     cd ~/irvin"
-    echo ""
-    echo "  3. Start Claude Code:"
-    echo "     claude"
-    echo ""
-    echo "  4. Detach from tmux:"
-    echo "     Press Ctrl+B, then D"
-    echo ""
-    echo "  5. Run this script again:"
-    echo "     ./start.sh"
-    echo ""
+    echo "To remove the LaunchAgent entirely:"
+    echo "    ./launchd/uninstall.sh"
     exit 1
 fi
 
-echo "Found tmux session: $TMUX_SESSION"
+# Create the tmux session if it's missing so the relay always has something
+# to talk to. The runtime bridge also self-heals if the session dies while
+# the relay is running, but we need one on first boot.
+if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "Tmux session '$TMUX_SESSION' not found - creating fresh session"
+    tmux new-session -d -s "$TMUX_SESSION" -c "$HOME"
+fi
 
-# Check if Claude appears to be running
+echo "Using tmux session: $TMUX_SESSION"
+
+# Informational check. Claude Code can be launched from the mobile UI via the
+# Start Claude button, so a missing Claude is no longer an error condition.
 if tmux capture-pane -t "$TMUX_SESSION" -p | grep -q -E "(Claude|Opus|Sonnet|bypass permissions)"; then
     echo "Claude Code detected in session"
 else
-    echo "WARNING: Claude Code may not be running in the tmux session"
-    echo "         The relay will still start, but you may need to run 'claude' in tmux"
+    echo "Note: Claude Code not running - use the mobile UI Start Claude button or run 'claude' in a pane"
 fi
 
 echo ""

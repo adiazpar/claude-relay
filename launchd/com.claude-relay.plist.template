@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude-relay</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>{{REPO}}/start.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>{{REPO}}</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>{{HOME}}</string>
+    <!-- Without a UTF-8 locale, tmux falls back to a "safe" mode that
+         rewrites control characters (including tabs) to '_' in format
+         output. Our list-windows parser uses tab as the field separator,
+         so without this tmuxBridge.listPanes returns []. TERM is also
+         set as a belt-and-suspenders for any other TUI interaction. -->
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>TERM</key>
+    <string>xterm-256color</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/Library/Logs/claude-relay.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/Library/Logs/claude-relay.log</string>
+</dict>
+</plist>

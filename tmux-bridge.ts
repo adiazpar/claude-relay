@@ -48,9 +48,41 @@ export class TmuxBridge extends EventEmitter {
   // a new process reusing the same port gets re-probed.
   private protocolCache = new Map<number, 'http' | 'https'>()
   private pendingProbes = new Set<number>()
+  // Cooldown between auto-recreate attempts so a repeatedly-failing tmux
+  // invocation (e.g. tmux binary missing) doesn't hammer execFileSync every
+  // poll tick. Reset on successful recreate.
+  private lastSessionRecreateAttempt = 0
+  private static readonly SESSION_RECREATE_COOLDOWN_MS = 5000
 
   constructor() {
     super()
+  }
+
+  // If the tmux session has disappeared (user ran tmux kill-session or
+  // kill-server, or the tmux server crashed), create a fresh one so the
+  // relay has something to talk to. Rate-limited to avoid thrashing when
+  // recreation itself fails. Emits 'sessionRecreated' so the server can
+  // push a fresh paneList to connected clients — otherwise they'd sit on
+  // stale pane IDs until a manual refresh.
+  private ensureSession(): boolean {
+    if (this.sessionExists()) return true
+    const now = Date.now()
+    if (now - this.lastSessionRecreateAttempt < TmuxBridge.SESSION_RECREATE_COOLDOWN_MS) {
+      return false
+    }
+    this.lastSessionRecreateAttempt = now
+    try {
+      this.runTmux(['new-session', '-d', '-s', TMUX_SESSION, '-c', DEFAULT_CWD])
+      console.log(`Recreated tmux session '${TMUX_SESSION}' after it went missing`)
+      this.lastOutputByPane.clear()
+      this.protocolCache.clear()
+      this.cachedPanes = []
+      this.emit('sessionRecreated')
+      return true
+    } catch (err) {
+      console.error('Failed to recreate tmux session:', err)
+      return false
+    }
   }
 
   // No-op for compatibility (typing state no longer affects polling)
@@ -90,18 +122,21 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  private isClaudeCommand(command: string): boolean {
+  private isClaudeCommand(command: string | undefined | null): boolean {
+    if (!command) return false
     const normalized = command.trim().toLowerCase()
     return /(^|[\/\s])claude($|\s)/.test(normalized)
   }
 
   // Claude Code sets process.title to its version string (e.g. "2.1.114"),
   // which is what tmux reports as pane_current_command.
-  private looksLikeClaudeVersion(command: string): boolean {
+  private looksLikeClaudeVersion(command: string | undefined | null): boolean {
+    if (!command) return false
     return /^\d+\.\d+\.\d+/.test(command.trim())
   }
 
-  private isShellCommand(command: string): boolean {
+  private isShellCommand(command: string | undefined | null): boolean {
+    if (!command) return false
     const normalized = command.trim().toLowerCase()
     return /(^|\/)(bash|zsh|sh|fish|ksh|tcsh|csh|dash|nu)$/.test(normalized)
   }
@@ -333,23 +368,35 @@ export class TmuxBridge extends EventEmitter {
     }
 
     try {
-      const fmt = '#{window_id}\t#{session_name}:#{window_index}\t#{window_index}\t#{window_index}\t#{pane_current_path}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}\t#{window_width}\t#{window_height}'
+      // pane_title is deliberately NOT included: TUIs (notably Claude Code)
+      // sometimes set it via OSC escapes to strings containing newlines or
+      // tabs, which would shred our tab-delimited/newline-separated parser
+      // and leave fields like currentCommand undefined. It's also unused
+      // elsewhere in the codebase, so dropping it costs nothing.
+      const FIELD_COUNT = 9
+      const fmt = '#{window_id}\t#{session_name}:#{window_index}\t#{window_index}\t#{window_index}\t#{pane_current_path}\t#{pane_pid}\t#{pane_current_command}\t#{window_width}\t#{window_height}'
       const output = this.runTmux(['list-windows', '-t', TMUX_SESSION, '-F', fmt])
 
-      const panes: PaneInfo[] = output.trim().split('\n').filter(Boolean).map(line => {
-        const [id, target, index, windowIndex, cwd, panePid, currentCommand, paneTitle, width, height] = line.split('\t')
-        return {
+      const panes: PaneInfo[] = output.trim().split('\n').filter(Boolean).flatMap(line => {
+        const parts = line.split('\t')
+        // Defensive: if any remaining user-controlled field ever sneaks in a
+        // tab or newline, skip the malformed row rather than crashing the
+        // 2s runtime-state broadcast loop.
+        if (parts.length < FIELD_COUNT) return []
+        const [id, target, index, windowIndex, cwd, panePid, currentCommand, width, height] = parts
+        if (!id || !target || !currentCommand) return []
+        return [{
           id,
           target,
           index: parseInt(index, 10),
           windowIndex: parseInt(windowIndex, 10),
-          cwd,
+          cwd: cwd || '',
           panePid: parseInt(panePid, 10),
           currentCommand,
-          paneTitle: paneTitle || '',
+          paneTitle: '',
           width: parseInt(width, 10),
           height: parseInt(height, 10)
-        }
+        }]
       })
       .sort((a, b) => a.windowIndex - b.windowIndex)
 
@@ -556,6 +603,8 @@ export class TmuxBridge extends EventEmitter {
     }
 
     this.pollTimer = setInterval(() => {
+      // Self-heal: recreate the tmux session if something killed it.
+      this.ensureSession()
       // Refresh pane list periodically
       const currentPanes = this.listPanes()
 

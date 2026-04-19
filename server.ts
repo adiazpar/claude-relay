@@ -472,6 +472,23 @@ tmuxBridge.on('protocolResolved', () => {
   }, 80)
 })
 
+// tmux session was auto-recreated (user killed it, tmux crashed). The fresh
+// session has new pane IDs, so clients need a fresh paneList — otherwise
+// they'd sit on stale state until they refreshed manually. Clients already
+// handle "my activePane disappeared" inside handlePaneList by switching to
+// the first available pane.
+tmuxBridge.on('sessionRecreated', () => {
+  if (wss.clients.size === 0) return
+  const panes = serializePanes()
+  const payload = JSON.stringify({ type: 'paneList', panes })
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(payload) } catch {}
+    }
+  })
+  broadcastRuntimeStates()
+})
+
 const PANE_STATE_BROADCAST_MS = 2000
 setInterval(() => {
   if (wss.clients.size === 0) return
