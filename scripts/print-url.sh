@@ -1,47 +1,69 @@
 #!/usr/bin/env bash
-# Enumerate URLs the relay is reachable on, and print a "best" recommendation.
+# Enumerate URLs the relay is reachable on, grouped by reachability.
 # Usage: print-url.sh <port>
-# Transport-agnostic: any mesh VPN (Tailscale, ZeroTier, Nebula) that adds an
-# IP to this machine appears automatically. We don't special-case anything
-# beyond Tailscale for cosmetic labeling and the "best URL" ranking.
+# Transport-agnostic: any mesh VPN (Tailscale, ZeroTier, Nebula) that adds
+# an IP to this machine appears automatically. We only special-case
+# Tailscale for labeling and for the "reachable from anywhere" grouping.
 
 set -euo pipefail
 
 PORT="${1:-3001}"
 OS="$(uname -s)"
 
-# Collect results as "host<TAB>label" lines. The "best" URL is the first
-# entry in the array after priority-ordered collection.
-urls=()
+# Two buckets:
+#   remote_urls: reachable from anywhere (Tailscale / mesh VPNs)
+#   local_urls:  reachable only on the same physical network (mDNS, LAN)
+remote_urls=()
+local_urls=()
 
-# ---- Tailscale ----
+# ---- Tailscale (MagicDNS + IPv4) ----
+# Parse `tailscale status --json` without jq. The Self block is emitted
+# before Peer, so the first "DNSName" field is always Self's FQDN.
+# Format: "DNSName": "<host>.<tailnet>.ts.net."
 if command -v tailscale >/dev/null 2>&1; then
-  ts_name=""
-  if command -v jq >/dev/null 2>&1; then
-    ts_name="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-  fi
+  ts_name="$(tailscale status --json 2>/dev/null \
+    | grep -o '"DNSName":[[:space:]]*"[^"]*"' \
+    | head -n 1 \
+    | cut -d'"' -f4 \
+    | sed 's/\.$//' || true)"
   ts_ip4="$(tailscale ip --4 2>/dev/null | head -n 1 || true)"
 
   if [ -n "$ts_name" ]; then
-    urls+=("$ts_name	Tailscale (MagicDNS)")
+    remote_urls+=("$ts_name	Tailscale MagicDNS")
   fi
   if [ -n "$ts_ip4" ]; then
-    urls+=("$ts_ip4	Tailscale IPv4")
+    remote_urls+=("$ts_ip4	Tailscale IPv4")
   fi
 fi
 
-# ---- mDNS (.local) ----
-hostname_short="$(hostname -s 2>/dev/null || hostname)"
-if [ -n "$hostname_short" ]; then
-  urls+=("$hostname_short.local	mDNS / same Wi-Fi")
+# ---- mDNS (<hostname>.local) ----
+# Only advertise if mDNS is actually running. macOS has mDNSResponder
+# built in. Linux needs avahi-daemon, which is NOT default on headless
+# servers (Ubuntu Server, most cloud images, containers, OrbStack VMs).
+mdns_available() {
+  case "$OS" in
+    Darwin) return 0 ;;
+    Linux)
+      pgrep -x avahi-daemon >/dev/null 2>&1 && return 0
+      systemctl is-active avahi-daemon >/dev/null 2>&1 && return 0
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+if mdns_available; then
+  hostname_short="$(hostname -s 2>/dev/null || hostname)"
+  if [ -n "$hostname_short" ]; then
+    local_urls+=("$hostname_short.local	via mDNS")
+  fi
 fi
 
 # ---- LAN IPv4s ----
 # Skip loopback (127.*), link-local (169.254.*), and the Tailscale CGNAT
-# range (100.64.0.0/10 which covers 100.64.* through 100.127.*). The
-# CGNAT range is Tailscale's allocation; those IPs are already handled
-# above with the correct "Tailscale IPv4" label.
-skip_cgnat() {
+# range (100.64.0.0/10, covering 100.64.* through 100.127.*) since those
+# are already surfaced as Tailscale above.
+skip_ip() {
   local ip="$1"
   case "$ip" in
     127.*|169.254.*) return 0 ;;
@@ -55,11 +77,7 @@ collect_lan_darwin() {
 }
 
 collect_lan_linux() {
-  if command -v jq >/dev/null 2>&1; then
-    ip -j addr 2>/dev/null | jq -r '.[].addr_info[]? | select(.family == "inet") | .local'
-  else
-    ip -4 addr 2>/dev/null | awk '/inet [0-9]/ {print $2}' | cut -d/ -f1
-  fi
+  ip -4 addr 2>/dev/null | awk '/inet [0-9]/ {print $2}' | cut -d/ -f1
 }
 
 case "$OS" in
@@ -71,31 +89,25 @@ esac
 if [ -n "$collector" ]; then
   while IFS= read -r ip; do
     [ -z "$ip" ] && continue
-    if skip_cgnat "$ip"; then continue; fi
-    urls+=("$ip	LAN")
+    if skip_ip "$ip"; then continue; fi
+    local_urls+=("$ip	direct IP")
   done < <("$collector")
 fi
 
 # ---- Print ----
-if [ "${#urls[@]}" -eq 0 ]; then
+total=$((${#remote_urls[@]} + ${#local_urls[@]}))
+if [ "$total" -eq 0 ]; then
   echo "Claude Relay running on port $PORT."
   echo "(Could not detect any network interfaces. Open http://<this-machine>:$PORT on your phone.)"
   exit 0
 fi
 
-best_host="$(printf '%s\n' "${urls[0]}" | cut -f1)"
 echo "Claude Relay running."
 echo ""
-echo "Open this on your phone:"
-echo ""
-echo "    http://$best_host:$PORT"
-echo ""
 
-if [ "${#urls[@]}" -gt 1 ]; then
-  echo "If that doesn't load, try one of these instead:"
-  echo ""
-  for i in $(seq 1 $((${#urls[@]} - 1))); do
-    line="${urls[$i]}"
+if [ "${#remote_urls[@]}" -gt 0 ]; then
+  echo "Reachable from anywhere (via Tailscale):"
+  for line in "${remote_urls[@]}"; do
     host="$(printf '%s' "$line" | cut -f1)"
     label="$(printf '%s' "$line" | cut -f2)"
     printf "    http://%s:%s   (%s)\n" "$host" "$PORT" "$label"
@@ -103,5 +115,23 @@ if [ "${#urls[@]}" -gt 1 ]; then
   echo ""
 fi
 
-echo "Your phone needs to reach this machine via one of these routes —"
-echo "Tailscale, same Wi-Fi, or another network you've set up."
+if [ "${#local_urls[@]}" -gt 0 ]; then
+  if [ "${#remote_urls[@]}" -gt 0 ]; then
+    echo "Reachable only on the same network (fallback):"
+  else
+    echo "Reachable only on the same network:"
+  fi
+  for line in "${local_urls[@]}"; do
+    host="$(printf '%s' "$line" | cut -f1)"
+    label="$(printf '%s' "$line" | cut -f2)"
+    printf "    http://%s:%s   (%s)\n" "$host" "$PORT" "$label"
+  done
+  echo ""
+fi
+
+# Gentle nudge if no "from anywhere" option was found.
+if [ "${#remote_urls[@]}" -eq 0 ]; then
+  echo "For access outside your local network, set up Tailscale."
+  echo "See the Tailscale section of the README for the full walkthrough."
+  echo ""
+fi

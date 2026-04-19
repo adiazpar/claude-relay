@@ -75,22 +75,87 @@ Run `claude login` once to authenticate your Max subscription.
 The relay will install and run without Claude Code, but the "Start
 Claude" button in the UI won't do anything until you install it.
 
+### Fresh Linux host setup (copy-paste)
+
+Starting from a blank Ubuntu/Debian machine — a new VM, a headless
+server, a Raspberry Pi — this installs everything the relay needs:
+
+    sudo apt update
+    sudo apt install -y tmux git curl ca-certificates
+
+    # Ubuntu's 'nodejs' apt package is too old. Use NodeSource:
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo apt install -y nodejs
+
+    # Verify
+    node --version    # must print v20.x or later
+    tmux -V
+
+On Fedora/RHEL, Arch, or Alpine, use the equivalent package manager
+(`dnf`, `pacman`, `apk`) — the tool list is the same. The NodeSource
+installer works across Debian-family distros.
+
 ## Reaching the relay from your phone
 
 The relay binds on all network interfaces. You have two realistic
-options for reaching it from your phone:
+options:
 
-1. **Same Wi-Fi only** (simplest). Open the LAN URL the installer
-   prints. Works at home, not on the go.
+1. **Same Wi-Fi only** (simplest). Use the "same network" URL the
+   installer prints. Works at home, fails on cell / cafe Wi-Fi.
 
-2. **Anywhere** (recommended). Install [Tailscale](https://tailscale.com/download)
-   on both the host and your phone, log into the same account, turn
-   both on, and use the Tailscale URL the installer prints. Free for
-   personal use.
+2. **Anywhere** (recommended). Set up Tailscale on the host and the
+   phone (walkthrough below) and use the "from anywhere" URL. Free
+   for personal use, works across cell carriers and captive portals.
 
-The installer prints every URL the host responds on — if you use a
-different mesh VPN (ZeroTier, Nebula, Netbird) or tunneling tool
-(cloudflared, ngrok), its address will appear in the list automatically.
+Other transports (ZeroTier, Nebula, Netbird, cloudflared, ngrok)
+that add a network interface to the host appear in the URL list
+automatically — nothing special to configure.
+
+## Tailscale setup
+
+Tailscale is a free-for-personal-use mesh VPN that stitches your
+devices into a private network addressable from anywhere with
+internet. This is the usual setup for "drive Claude Code from my
+phone while out of the house."
+
+### On the host — macOS
+
+    brew install --cask tailscale
+    # OR download the .app from https://tailscale.com/download
+
+Launch Tailscale, log into your account, toggle it on. It lives in
+the menu bar.
+
+### On the host — Linux
+
+    curl -fsSL https://tailscale.com/install.sh | sh
+    sudo tailscale up          # prints a login URL; auth in any browser
+    tailscale ip -4            # should print a 100.x.x.x address
+
+### On your phone
+
+1. Install the Tailscale app (iOS / Android).
+2. Log in with the **same account** you used on the host.
+3. Toggle the connection on.
+
+### Verify
+
+Run `./relay status` on the host. The URL list should now show a
+"Reachable from anywhere" entry with a Tailscale MagicDNS name or
+IP. Open that URL on the phone.
+
+**If the phone doesn't pick up the new URL right away**, open the
+Tailscale app on the phone and toggle the connection off and back
+on. The phone's client refreshes its view of the tailnet.
+
+### Tearing down a Tailscale host
+
+If you're wiping a VM or decommissioning a host that was in your
+tailnet, run `sudo tailscale logout` **inside the host** before
+destroying it. That unregisters the device cleanly. If you forget,
+the device lingers as "offline" in your tailnet — harmless but
+cluttering — until you delete it manually at
+https://login.tailscale.com/admin/machines.
 
 ## Install
 
@@ -194,6 +259,12 @@ meaningful second project; tracked but unscheduled.)
 - **Can't reach the URL on your phone**: ensure Tailscale is on (or
   you're on the same Wi-Fi as the host). Check the host's firewall
   allows inbound connections on port 3001.
+- **"Same network" URL doesn't work even on the same Wi-Fi**: if
+  you're running the relay inside a VM (OrbStack, UTM, VMware) that
+  NATs traffic, the VM's "same network" IP is on the hypervisor's
+  private subnet, not your physical Wi-Fi. The phone cannot route
+  there. Tailscale inside the VM is the fix — install it and use
+  the `100.x.x.x` URL.
 - **Relay restarts in a loop**: run `./relay dev` to see the error
   live. Most common cause: tmux or node isn't on the service's PATH.
 - **Claude session doesn't respond to input**: make sure `claude` is
