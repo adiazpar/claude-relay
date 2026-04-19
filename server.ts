@@ -1,7 +1,5 @@
 import express from 'express'
 import { createServer } from 'http'
-import { createServer as createHttpsServer } from 'https'
-import { readFileSync, existsSync } from 'fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -15,14 +13,6 @@ const __dirname = path.dirname(__filename)
 const MAX_WS_MESSAGE_BYTES = 64 * 1024
 // Max inbound message content length (characters)
 const MAX_MESSAGE_CONTENT_CHARS = 16 * 1024
-
-// SSL certificate paths - check both project root and dist parent
-const certsInCurrentDir = path.join(__dirname, 'certs')
-const certsInParentDir = path.join(__dirname, '..', 'certs')
-const certsDir = existsSync(certsInCurrentDir) ? certsInCurrentDir : certsInParentDir
-const certPath = path.join(certsDir, 'cert.pem')
-const keyPath = path.join(certsDir, 'key.pem')
-const sslAvailable = existsSync(certPath) && existsSync(keyPath)
 
 // Split terminal output into raw ANSI lines
 // Client handles ANSI-to-HTML conversion for better performance
@@ -56,20 +46,10 @@ function validateCwd(cwd: unknown): string | null {
 
 const app = express()
 
-// Create HTTP server
 const httpServer = createServer(app)
 
-// Create HTTPS server if certificates are available
-const httpsServer = sslAvailable
-  ? createHttpsServer({
-      key: readFileSync(keyPath),
-      cert: readFileSync(certPath)
-    }, app)
-  : null
-
-// WebSocket server - attach to HTTPS if available, otherwise HTTP
 const wss = new WebSocketServer({
-  server: httpsServer || httpServer,
+  server: httpServer,
   maxPayload: MAX_WS_MESSAGE_BYTES
 })
 
@@ -93,17 +73,6 @@ app.get('/api/health', (req, res) => {
     tmuxSession: tmuxBridge.sessionExists(),
     claudeRunning: tmuxBridge.isClaudeRunning()
   })
-})
-
-// Serve SSL certificate for iOS installation
-app.get('/cert', (req, res) => {
-  if (sslAvailable) {
-    res.setHeader('Content-Type', 'application/x-x509-ca-cert')
-    res.setHeader('Content-Disposition', 'attachment; filename="claude-relay.cer"')
-    res.sendFile(certPath)
-  } else {
-    res.status(404).send('No certificate available')
-  }
 })
 
 // Get current pane content
@@ -504,47 +473,24 @@ setInterval(() => {
 // Start polling for output changes
 tmuxBridge.startPolling()
 
-const PORT = 3001
+const PORT = parseInt(process.env.PORT || '3001', 10)
 
-// Start HTTPS server if available, otherwise HTTP
-if (httpsServer) {
-  httpsServer.listen(PORT, HOST, () => {
-    console.log(`
+httpServer.listen(PORT, HOST, () => {
+  console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                    Claude Relay Server                     ║
 ╠════════════════════════════════════════════════════════════╣
-║  URL: https://100.113.9.34:${PORT}                           ║
-╠════════════════════════════════════════════════════════════╣
-║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
-║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
-║  Voice Input:  Enabled                                     ║
+║  Listening on http://${HOST}:${PORT}
+║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}
+║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}
 ╚════════════════════════════════════════════════════════════╝
 `)
-  })
-} else {
-  httpServer.listen(PORT, HOST, () => {
-    console.log(`
-╔════════════════════════════════════════════════════════════╗
-║                    Claude Relay Server                     ║
-╠════════════════════════════════════════════════════════════╣
-║  URL: http://100.113.9.34:${PORT}                            ║
-╠════════════════════════════════════════════════════════════╣
-║  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}                              ║
-║  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}                               ║
-║  Voice Input:  Disabled (no SSL certs)                     ║
-╚════════════════════════════════════════════════════════════╝
-`)
-  })
-}
+})
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...')
   tmuxBridge.stopPolling()
-  if (httpsServer) {
-    httpsServer.close()
-  } else {
-    httpServer.close()
-  }
+  httpServer.close()
   process.exit(0)
 })
