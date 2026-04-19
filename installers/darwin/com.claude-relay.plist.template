@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>{{REPO}}/start.sh</string>
+    <string>{{REPO}}/scripts/serve.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -49,7 +49,7 @@
 
   <!-- Capture stdout/stderr to the repo so first-boot crashes are
        diagnosable. On a healthy daemon these stay effectively empty.
-       Set DEBUG=1 in the install environment (DEBUG=1 ./install.sh) to
+       Set DEBUG=1 in the install environment (DEBUG=1 ./relay install) to
        additionally enable node's rotating app log at
        {{REPO}}/logs/debug.log. -->
   <key>StandardOutPath</key>

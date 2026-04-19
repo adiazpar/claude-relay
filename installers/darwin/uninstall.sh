@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Claude Relay — Darwin uninstaller. Invoked by top-level ./uninstall.sh.
+# Claude Relay — Darwin uninstaller. Invoked by scripts/uninstall.sh
+# (which itself is invoked by './relay uninstall').
 #
 # Contract with the top-level dispatcher:
 # - On a clean system (nothing to remove), exit 0 silently (no stdout).

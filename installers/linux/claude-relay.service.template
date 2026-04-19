@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash {{REPO}}/start.sh
+ExecStart=/bin/bash {{REPO}}/scripts/serve.sh
 WorkingDirectory={{REPO}}
 Restart=always
 RestartSec=10

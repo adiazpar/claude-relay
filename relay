@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Claude Relay — unified lifecycle CLI.
+# Run './relay help' for usage.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")" && pwd)"
+OS="$(uname -s)"
+LABEL="com.claude-relay"
+
+PORT="${PORT:-3001}"
+TMUX_SESSION="${TMUX_SESSION:-dev}"
+
+say()  { echo "$@"; }
+warn() { echo "warning: $@" >&2; }
+die()  { echo "error: $@" >&2; exit 1; }
+
+case "$OS" in
+  Darwin|Linux) ;;
+  *) die "claude-relay supports macOS and Linux (detected: $OS)." ;;
+esac
+
+service_plist() { echo "$HOME/Library/LaunchAgents/$LABEL.plist"; }
+
+service_loaded() {
+  case "$OS" in
+    Darwin) launchctl list 2>/dev/null | { grep -c "$LABEL" || true; } | grep -q "^[1-9]" ;;
+    Linux)  systemctl --user is-enabled claude-relay.service >/dev/null 2>&1 ;;
+  esac
+}
+
+cmd_start() {
+  case "$OS" in
+    Darwin)
+      [ -f "$(service_plist)" ] || die "Not installed. Run './relay install' first."
+      if service_loaded; then
+        launchctl kickstart "gui/$(id -u)/$LABEL"
+        say "Kickstarted $LABEL."
+      else
+        launchctl load "$(service_plist)"
+        say "Loaded $LABEL."
+      fi
+      ;;
+    Linux)
+      [ -f "$HOME/.config/systemd/user/claude-relay.service" ] \
+        || die "Not installed. Run './relay install' first."
+      systemctl --user start claude-relay.service
+      say "Started claude-relay."
+      ;;
+  esac
+}
+
+cmd_stop() {
+  case "$OS" in
+    Darwin)
+      if ! service_loaded; then
+        say "Not loaded. Nothing to stop."
+        return 0
+      fi
+      launchctl unload "$(service_plist)"
+      say "Unloaded $LABEL. (Auto-loads again at next login unless you uninstall.)"
+      ;;
+    Linux)
+      systemctl --user stop claude-relay.service || true
+      say "Stopped claude-relay."
+      ;;
+  esac
+}
+
+cmd_restart() {
+  case "$OS" in
+    Darwin)
+      service_loaded || die "Not loaded. Run './relay start' first."
+      launchctl kickstart -k "gui/$(id -u)/$LABEL"
+      say "Bounced $LABEL."
+      ;;
+    Linux)
+      systemctl --user restart claude-relay.service
+      say "Restarted claude-relay."
+      ;;
+  esac
+}
+
+cmd_status() {
+  local loaded="no" responsive="no"
+  service_loaded && loaded="yes"
+  if curl -sI "http://127.0.0.1:$PORT/api/health" 2>/dev/null | head -n 1 | grep -q "200"; then
+    responsive="yes"
+  fi
+  say "Service loaded:  $loaded"
+  say "HTTP responsive: $responsive (port $PORT)"
+  if [ "$responsive" = "yes" ] && [ -x "$REPO/scripts/print-url.sh" ]; then
+    say ""
+    "$REPO/scripts/print-url.sh" "$PORT"
+  fi
+}
+
+cmd_dev() {
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    say "Port $PORT is already in use."
+    say ""
+    if service_loaded; then
+      say "The daemon is already running. Stop it first:"
+      say "    ./relay stop"
+    else
+      say "Find and kill whatever is holding port $PORT, then retry."
+    fi
+    exit 1
+  fi
+  if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    say "Creating tmux session '$TMUX_SESSION'"
+    tmux new-session -d -s "$TMUX_SESSION" -c "$HOME"
+  fi
+  say "Starting foreground server on port $PORT (Ctrl-C to stop)..."
+  say ""
+  cd "$REPO"
+  exec npm run start
+}
+
+usage() {
+  cat <<'EOF'
+Claude Relay — drive N parallel Claude Code sessions from your phone.
+
+Usage: ./relay <command> [options]
+
+Commands:
+  install       First-time setup. Installs deps, registers the service,
+                prints the URL to open on your phone.
+  uninstall     Remove the service, logs, and tmux session.
+                Flags: --dry-run, --keep-tmux
+  start         Load and start the daemon (or kickstart if already loaded).
+  stop          Unload the daemon (auto-loads again at next login).
+  restart       Bounce the daemon (e.g., after a git pull).
+  status        Is it running? What URL?
+  dev           Run in foreground with live logs (for debugging).
+  help          Print this message.
+
+Environment:
+  PORT=4000         Default 3001. Port the daemon binds to.
+  TMUX_SESSION=w    Default "dev". Tmux session name.
+  DEBUG=1           Enable rotating app log at ./logs/debug.log.
+  VERBOSE=1         Show full npm install output during install.
+
+Examples:
+  ./relay install
+  ./relay restart               # after git pull
+  ./relay uninstall --keep-tmux # remove service but preserve workspace
+EOF
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  install)   exec "$REPO/scripts/install.sh" "$@" ;;
+  uninstall) exec "$REPO/scripts/uninstall.sh" "$@" ;;
+  start)     cmd_start "$@" ;;
+  stop)      cmd_stop "$@" ;;
+  restart)   cmd_restart "$@" ;;
+  status)    cmd_status "$@" ;;
+  dev)       cmd_dev "$@" ;;
+  help|-h|--help|"") usage ;;
+  *) echo "error: unknown command '$cmd'. Run './relay help'." >&2; exit 1 ;;
+esac

@@ -29,6 +29,3 @@ launchctl load "$PLIST_DEST"
 
 echo "claude-relay LaunchAgent installed"
 echo "  plist: $PLIST_DEST"
-echo ""
-echo "Uninstall: launchctl unload $PLIST_DEST && rm $PLIST_DEST"
-echo "Restart:   launchctl kickstart -k gui/$(id -u)/$LABEL"

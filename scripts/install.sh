@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Claude Relay — top-level install dispatcher.
+# Claude Relay — install. Invoked as './relay install' from the top-level CLI.
 # Detects OS, verifies deps, runs npm install, delegates to per-OS installer,
 # health-checks the daemon, prints the URL to open on the phone.
 
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 PORT="${PORT:-3001}"
 TMUX_SESSION="${TMUX_SESSION:-dev}"
@@ -49,7 +49,7 @@ install_hint() {
       ;;
   esac
   say ""
-  say "  After installing, re-run ./install.sh"
+  say "  After installing, re-run: ./relay install"
 }
 
 say "Claude Relay — installing on $OS"
@@ -107,7 +107,7 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     die "Port $PORT is in use by another process.
 
 Either stop the other service, or rerun with a different port:
-  PORT=4000 ./install.sh"
+  PORT=4000 ./relay install"
   fi
 fi
 
@@ -151,7 +151,7 @@ for i in $(seq 1 30); do
           tail -n 20 "$REPO/logs/launchd.err"
           say "------------------------------------------------------------"
         else
-          say "No launchd stderr captured — run ./start.sh in the foreground to see the error."
+          say "No launchd stderr captured — run './relay dev' to see the error live."
         fi
         ;;
       Linux)
@@ -170,8 +170,7 @@ if [ -x "$REPO/scripts/print-url.sh" ]; then
   "$REPO/scripts/print-url.sh" "$PORT"
 else
   say "Claude Relay running on port $PORT."
-  say "(scripts/print-url.sh will be added in the next commit.)"
 fi
 
 say ""
-say "To uninstall: $REPO/uninstall.sh"
+say "To uninstall: ./relay uninstall"

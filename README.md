@@ -97,7 +97,7 @@ different mesh VPN (ZeroTier, Nebula, Netbird) or tunneling tool
     git clone https://github.com/YOUR_USERNAME/claude-relay.git
     # Replace YOUR_USERNAME with the fork/mirror you trust.
     cd claude-relay
-    ./install.sh
+    ./relay install
 
 The installer:
 1. Detects your OS (macOS or Linux only for v1).
@@ -111,7 +111,7 @@ The installer:
 
 Configuration via env vars (all optional):
 
-    PORT=4000 TMUX_SESSION=work DEBUG=1 ./install.sh
+    PORT=4000 TMUX_SESSION=work DEBUG=1 ./relay install
 
 - `PORT` — default 3001.
 - `TMUX_SESSION` — default "dev". The tmux session name the relay binds to.
@@ -121,22 +121,32 @@ Configuration via env vars (all optional):
   `./logs/launchd.err` regardless of DEBUG — stays ~empty when healthy.
 - `VERBOSE=1` — show full output from noisy sub-commands like `npm install`.
 
+## Daily commands
+
+The service auto-loads at login and restarts on crash, so most days
+you won't touch these. But for when you do:
+
+    ./relay status        # is it running? what URL?
+    ./relay restart       # bounce after a git pull
+    ./relay stop          # temporarily stop (auto-starts at next login)
+    ./relay start         # start it back up
+    ./relay dev           # foreground mode with live logs (debugging)
+    ./relay help          # full usage
+
 ## Uninstall
 
-    ./uninstall.sh               # remove service registration + logs
-    ./uninstall.sh --dry-run     # show what would be removed, touch nothing
-    ./uninstall.sh --purge       # also kill the tmux session (prompts first)
-    ./uninstall.sh --purge --yes # unattended: purge without prompt
-    ./uninstall.sh --help        # flag documentation
+    ./relay uninstall              # remove service, logs, and tmux session
+    ./relay uninstall --dry-run    # show what would be removed, touch nothing
+    ./relay uninstall --keep-tmux  # remove service + logs, preserve tmux
+    ./relay uninstall --help       # flag documentation
 
 Uninstall leaves alone:
-- Your tmux session's running processes (unless `--purge`).
-- `node_modules/` inside this repo — delete the repo clone to remove.
+- `node_modules/` inside this repo — `rm -rf` the clone to remove.
 - Claude Code CLI — not installed by claude-relay.
 - Tailscale — not installed by claude-relay.
 
 All relay-owned state lives in the repo clone (`logs/`, `node_modules/`)
-plus the service registration. So after `./uninstall.sh`, a plain
+plus the service registration. So after `./relay uninstall`, a plain
 `rm -rf claude-relay` of the cloned directory completes the wipe — no
 state is left scattered under `~/.cache` or `~/Library`.
 
@@ -184,14 +194,12 @@ meaningful second project; tracked but unscheduled.)
 - **Can't reach the URL on your phone**: ensure Tailscale is on (or
   you're on the same Wi-Fi as the host). Check the host's firewall
   allows inbound connections on port 3001.
-- **Relay restarts in a loop**: run `./start.sh` in the foreground to
-  see the error live. Most common cause: tmux or node isn't on the
-  service's PATH.
+- **Relay restarts in a loop**: run `./relay dev` to see the error
+  live. Most common cause: tmux or node isn't on the service's PATH.
 - **Claude session doesn't respond to input**: make sure `claude` is
   installed (`claude --version`). Check `./logs/launchd.err` first for
   the service's own crash trail. If you installed with `DEBUG=1`, also
-  tail `./logs/debug.log`. Otherwise run `./start.sh` in foreground to
-  see output.
+  tail `./logs/debug.log`. Otherwise run `./relay dev` to see output.
 - **Service won't start at all**: on Linux, `journalctl --user -u
   claude-relay` shows lifecycle errors regardless of DEBUG. On macOS,
   open Console.app and filter for "com.claude-relay".

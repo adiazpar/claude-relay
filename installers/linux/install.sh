@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Claude Relay — Linux installer. Invoked by top-level ./install.sh.
+# Claude Relay — Linux installer. Invoked by scripts/install.sh
+# (which itself is invoked by './relay install').
 # Renders a systemd user service, enables it, and arranges for it to
 # survive SSH logout via `loginctl enable-linger` (recorded with a
 # marker file so uninstall can revert without disturbing pre-existing
@@ -47,7 +48,7 @@ sed -e "s|{{HOME}}|$HOME|g" \
 if ! systemctl --user daemon-reload 2>/dev/null; then
   echo "error: systemctl --user daemon-reload failed." >&2
   echo "If this is a fresh SSH login on a minimal server, the user bus may not be running." >&2
-  echo "Try: loginctl enable-linger $USER  (then log out and log back in and re-run ./install.sh)" >&2
+  echo "Try: loginctl enable-linger $USER  (then log out and log back in and re-run './relay install')" >&2
   exit 1
 fi
 systemctl --user enable --now claude-relay.service
