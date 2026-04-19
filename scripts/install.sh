@@ -52,6 +52,7 @@ install_hint() {
   say "  After installing, re-run: ./relay install"
 }
 
+say ""
 say "Claude Relay — installing on $OS"
 say ""
 
@@ -174,3 +175,4 @@ fi
 
 say ""
 say "To uninstall: ./relay uninstall"
+say ""

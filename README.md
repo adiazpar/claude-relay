@@ -267,3 +267,21 @@ tail `./logs/debug.log`. Otherwise run `./relay dev`.
 `journalctl --user -u claude-relay` shows lifecycle errors
 regardless of `DEBUG`. On macOS, open Console.app and filter for
 `com.claude-relay`.
+
+## Contributing & feedback
+
+Claude Relay is open source and built in the open. Contributions,
+bug reports, and feature ideas are all welcome:
+
+- **Found a bug?** [Open an issue](https://github.com/adiazpar/claude-relay/issues/new)
+  with reproduction steps and what platform you're on.
+- **Have an idea or a question?**
+  [Start a discussion](https://github.com/adiazpar/claude-relay/discussions)
+  — design decisions and "would this make sense?" conversations
+  happen there.
+- **Want to contribute code?** Fork, branch, submit a PR. Small
+  focused changes are easier to review than sweeping refactors.
+  Please include a quick note on how you tested.
+
+If Claude Relay is useful to your workflow, starring the repo helps
+other people find it. Thanks for checking out the project.

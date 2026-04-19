@@ -151,14 +151,18 @@ EOF
 cmd="${1:-help}"
 shift || true
 
+# Wrap local subcommand output with leading/trailing blank lines so
+# terminal output has visual breathing room from the shell prompt.
+# install/uninstall/dev exec into other processes and handle spacing
+# inside those scripts; help prints usage which is self-contained.
 case "$cmd" in
   install)   exec "$REPO/scripts/install.sh" "$@" ;;
   uninstall) exec "$REPO/scripts/uninstall.sh" "$@" ;;
-  start)     cmd_start "$@" ;;
-  stop)      cmd_stop "$@" ;;
-  restart)   cmd_restart "$@" ;;
-  status)    cmd_status "$@" ;;
-  dev)       cmd_dev "$@" ;;
-  help|-h|--help|"") usage ;;
+  start)     echo; cmd_start "$@"; echo ;;
+  stop)      echo; cmd_stop "$@"; echo ;;
+  restart)   echo; cmd_restart "$@"; echo ;;
+  status)    echo; cmd_status "$@"; echo ;;
+  dev)       echo; cmd_dev "$@" ;;
+  help|-h|--help|"") echo; usage; echo ;;
   *) echo "error: unknown command '$cmd'. Run './relay help'." >&2; exit 1 ;;
 esac

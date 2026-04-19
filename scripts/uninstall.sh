@@ -54,6 +54,7 @@ TMUX_SESSION="${TMUX_SESSION:-dev}"
 say() { echo "$@"; }
 die() { echo "error: $@" >&2; exit 1; }
 
+say ""
 say "Claude Relay — uninstalling"
 [ "$DRY_RUN" = "1" ] && say "(dry-run mode — nothing will be touched)"
 say ""
@@ -140,3 +141,4 @@ else
   say "  - Claude Code CLI (not installed by claude-relay)"
   say "  - Tailscale (not installed by claude-relay)"
 fi
+say ""
