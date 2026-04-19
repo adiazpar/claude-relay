@@ -649,10 +649,6 @@
       cursor: not-allowed;
     }
 
-    .send-btn .icon-send {
-      position: absolute;
-    }
-
     /* Command palette button */
     .commands-btn {
       width: 28px;
@@ -865,7 +861,7 @@
         data-form-type="other"
       ></textarea>
       <button class="send-btn" id="sendBtn" onclick="handleSendButton()" aria-label="Send message">
-        <i class="icon-send" data-lucide="arrow-up"></i>
+        <i data-lucide="arrow-up"></i>
       </button>
     </div>
   </div>
@@ -2119,7 +2115,6 @@
       messageInput.value = state.inputText;
       messageInput.style.height = 'auto';
       messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
-      updateButtonState();
 
       // Restore commands if cached, or fetch fresh
       if (state.commands.length > 0) {
@@ -2209,7 +2204,6 @@
       // Optimistic UI: clear input immediately
       messageInput.value = '';
       messageInput.style.height = 'auto';
-      updateButtonState();
 
       if (isSocketUsable()) {
         ws.send(JSON.stringify({ type: 'send', content: message }));
@@ -2264,10 +2258,6 @@
       }
     }
 
-    function updateButtonState() {
-      // No-op: send button is always in send mode now
-    }
-
     // ============================================
     // DYNAMIC INPUT AREA PADDING
     // ============================================
@@ -2301,7 +2291,6 @@
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
         updateOutputPadding();
-        updateButtonState();
       });
     });
 
@@ -2517,7 +2506,6 @@
     // ============================================
     // START
     // ============================================
-    updateButtonState();
 
     // Immediately fetch everything via REST - don't wait for WebSocket
     async function initializeFromREST(options = {}) {
