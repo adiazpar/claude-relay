@@ -1,21 +1,26 @@
-#!/bin/bash
-# Remove the claude-relay LaunchAgent. After this the relay no longer
-# auto-starts at login or auto-restarts on crash; fall back to ./start.sh
-# for manual runs.
+#!/usr/bin/env bash
+# Claude Relay — Darwin uninstaller. Invoked by top-level ./uninstall.sh.
 
 set -euo pipefail
 
-PLIST_DEST="$HOME/Library/LaunchAgents/com.claude-relay.plist"
+PLIST="$HOME/Library/LaunchAgents/com.claude-relay.plist"
+LABEL="com.claude-relay"
+DRY_RUN="${DRY_RUN:-0}"
 
-if [ ! -f "$PLIST_DEST" ]; then
-    echo "No LaunchAgent found at $PLIST_DEST - nothing to uninstall"
-    exit 0
+service_registered() {
+  launchctl list 2>/dev/null | { grep -c "$LABEL" || true; } | grep -q "^[1-9]"
+}
+
+if [ ! -f "$PLIST" ] && ! service_registered; then
+  exit 0
 fi
 
-# Unload tolerates being called on an already-unloaded agent, but suppress
-# the error message either way.
-launchctl unload "$PLIST_DEST" >/dev/null 2>&1 || true
-rm "$PLIST_DEST"
+if [ "$DRY_RUN" = "1" ]; then
+  [ -f "$PLIST" ] && echo "Would unload and remove $PLIST"
+  service_registered && echo "Would unload LaunchAgent $LABEL"
+  exit 0
+fi
 
-echo "claude-relay LaunchAgent removed"
-echo "  (log file preserved at \$HOME/Library/Logs/claude-relay.log)"
+launchctl unload "$PLIST" 2>/dev/null || true
+rm -f "$PLIST"
+echo "Removed $PLIST"

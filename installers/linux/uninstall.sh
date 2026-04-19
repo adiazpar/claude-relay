@@ -6,9 +6,15 @@ set -euo pipefail
 UNIT="$HOME/.config/systemd/user/claude-relay.service"
 STATE_DIR="$HOME/.config/claude-relay"
 LINGER_MARKER="$STATE_DIR/.enabled-linger"
+DRY_RUN="${DRY_RUN:-0}"
 
 if [ ! -f "$UNIT" ] && [ ! -f "$LINGER_MARKER" ]; then
-  echo "No systemd service or linger marker to remove."
+  exit 0
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+  [ -f "$UNIT" ] && echo "Would disable and remove $UNIT"
+  [ -f "$LINGER_MARKER" ] && echo "Would disable loginctl linger for $USER"
   exit 0
 fi
 
