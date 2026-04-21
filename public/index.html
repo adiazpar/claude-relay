@@ -1188,6 +1188,7 @@
     const serverRestartBtn = document.getElementById('serverRestartBtn');
     const serverPortsRow = document.getElementById('serverPortsRow');
     const inputRow = document.getElementById('inputRow');
+    const attachBtn = document.getElementById('attachBtn');
     const attachFileInput = document.getElementById('attachFileInput');
     const attachPreview = document.getElementById('attachPreview');
     const attachError = document.getElementById('attachError');
@@ -1818,6 +1819,10 @@
       if (typeof updateOutputPadding === 'function') updateOutputPadding();
       // Slash-commands only make sense once Claude is accepting input.
       commandsBtn.style.display = claudeRunning ? '' : 'none';
+
+      // Same for image attachments — a shell prompt would just echo the
+      // path and error. Hide the paperclip until Claude is up.
+      if (attachBtn) attachBtn.style.display = claudeRunning ? '' : 'none';
 
       if (claudeRunning) {
         modeActionLabel.textContent = 'Change mode';
