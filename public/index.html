@@ -2352,11 +2352,45 @@
 
     function sendMessage() {
       const message = messageInput.value.trim();
-      if (!message) return;
+      if (!message && !pendingImage) return;
 
-      // Optimistic UI: clear input immediately
+      // Snapshot the image before we clear state, so we can still send it
+      // even though the thumbnail disappears optimistically.
+      const imageToSend = pendingImage;
+
+      // Optimistic UI: clear input and thumbnail immediately
       messageInput.value = '';
       messageInput.style.height = 'auto';
+      clearPendingImage();
+
+      // Image-attached sends can't use WS — the WS maxPayload is 64 KB,
+      // nowhere near enough for a 10 MB image. Always go through POST.
+      if (imageToSend) {
+        fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message,
+            target: activePaneTarget,
+            image: {
+              mime: imageToSend.mime,
+              base64: imageToSend.dataUrl.split(',')[1],
+            },
+          })
+        })
+          .then(res => res.json())
+          .then(data => {
+            if (!data.success) {
+              showAttachError(data.error || 'Send failed');
+            }
+            scheduleResumeSync('sendMessage');
+          })
+          .catch(err => {
+            console.error('Image send failed:', err);
+            showAttachError('Network error');
+          });
+        return;
+      }
 
       if (isSocketUsable()) {
         ws.send(JSON.stringify({ type: 'send', content: message }));
@@ -2406,7 +2440,7 @@
 
     // Handle send button click
     function handleSendButton() {
-      if (messageInput.value.trim().length > 0) {
+      if (messageInput.value.trim().length > 0 || pendingImage) {
         sendMessage();
       }
     }
