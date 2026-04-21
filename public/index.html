@@ -689,6 +689,34 @@
       border-color: rgb(248, 113, 113);
     }
 
+    /* Circular progress ring rendered over the image while uploading.
+       Track is the full faint circle; indicator is the bright arc that
+       grows via stroke-dashoffset updates from XHR upload events. */
+    .upload-ring {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 32px;
+      height: 32px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .upload-ring-track {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.2);
+      stroke-width: 3;
+    }
+
+    .upload-ring-indicator {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.95);
+      stroke-width: 3;
+      stroke-linecap: round;
+      /* Dasharray + dashoffset set inline via JS — depends on circle
+         circumference (2π × r). */
+    }
+
     /* Each image wears the same 1px var(--border) as .shortcut-btn.
        box-sizing: border-box keeps the rendered size at exactly 72×72
        so the border replaces the outer 1px of image pixels instead of
@@ -1210,57 +1238,161 @@
       renderAttachPreview();
     }
 
+    // If the user picks a big image (either dimension > 2048px, or file
+    // size > 2 MB), resize + re-encode as JPEG at 0.85 quality. For
+    // smaller images — typically screenshots already well under 2 MB —
+    // we upload the original file untouched to preserve fidelity.
+    const COMPRESS_MAX_DIM = 2048;
+    const COMPRESS_SIZE_TRIGGER = 2 * 1024 * 1024;
+    const COMPRESS_QUALITY = 0.85;
+
+    function loadImageFromFile(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('decode failed')); };
+        img.src = url;
+      });
+    }
+
+    function resizeToJpeg(img, maxDim, quality) {
+      const longest = Math.max(img.width, img.height);
+      const scale = longest > maxDim ? maxDim / longest : 1;
+      const width = Math.round(img.width * scale);
+      const height = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      return new Promise((resolve, reject) => {
+        canvas.toBlob(
+          blob => blob ? resolve(blob) : reject(new Error('encode failed')),
+          'image/jpeg',
+          quality
+        );
+      });
+    }
+
+    function readBlobAsDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error('read failed'));
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    // Decide whether to compress. Returns { blob, mime, dataUrl } with the
+    // bytes that should actually be uploaded (compressed or original).
+    async function prepareForUpload(file) {
+      const tooBig = file.size > COMPRESS_SIZE_TRIGGER;
+      let img = null;
+      try { img = await loadImageFromFile(file); } catch { img = null; }
+
+      const tooLarge = img && Math.max(img.width, img.height) > COMPRESS_MAX_DIM;
+
+      if (!tooBig && !tooLarge) {
+        const dataUrl = await readBlobAsDataUrl(file);
+        return { blob: file, mime: file.type, dataUrl };
+      }
+
+      if (!img) {
+        // File is big but we couldn't decode it — fall back to original.
+        const dataUrl = await readBlobAsDataUrl(file);
+        return { blob: file, mime: file.type, dataUrl };
+      }
+
+      const jpegBlob = await resizeToJpeg(img, COMPRESS_MAX_DIM, COMPRESS_QUALITY);
+      const dataUrl = await readBlobAsDataUrl(jpegBlob);
+      return { blob: jpegBlob, mime: 'image/jpeg', dataUrl };
+    }
+
     function stageFile(file) {
       const entry = {
         id: ++pendingImageSeq,
         dataUrl: '',
         token: null,
         uploading: true,
+        progress: 0,
         error: null,
       };
       pendingImages.push(entry);
+      renderAttachPreview();
 
-      const reader = new FileReader();
-      reader.onload = () => {
-        entry.dataUrl = reader.result;
-        renderAttachPreview();
-        uploadEntry(entry, file.type);
-      };
-      reader.onerror = () => {
-        entry.uploading = false;
-        entry.error = 'read failed';
-        renderAttachPreview();
-      };
-      reader.readAsDataURL(file);
+      prepareForUpload(file)
+        .then(({ blob, mime, dataUrl }) => {
+          entry.dataUrl = dataUrl;
+          renderAttachPreview();
+          uploadEntry(entry, blob, mime);
+        })
+        .catch(err => {
+          console.error('Prepare failed:', err);
+          entry.uploading = false;
+          entry.error = 'read failed';
+          renderAttachPreview();
+          updateSendBtnState();
+        });
     }
 
-    function uploadEntry(entry, mime) {
-      const base64 = (entry.dataUrl.split(',')[1]) || '';
-      fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mime, base64 }),
-      })
-        .then(res => res.json().then(body => ({ ok: res.ok, body })))
-        .then(({ ok, body }) => {
+    // Upload via XHR so we can show real upload progress — fetch() doesn't
+    // expose upload.onprogress. The body is still base64 JSON to match the
+    // server's existing /api/upload shape.
+    function uploadEntry(entry, blob, mime) {
+      readBlobAsDataUrl(blob).then(dataUrl => {
+        const base64 = (dataUrl.split(',')[1]) || '';
+        const body = JSON.stringify({ mime, base64 });
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+        xhr.setRequestHeader('Content-Type', 'application/json');
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (!e.lengthComputable) return;
+          entry.progress = e.loaded / e.total;
+          updateEntryProgress(entry);
+        });
+
+        xhr.addEventListener('load', () => {
           entry.uploading = false;
-          if (ok && body.success && body.token) {
-            entry.token = body.token;
-          } else {
-            entry.error = body.error || 'upload failed';
+          entry.progress = 1;
+          try {
+            const parsed = JSON.parse(xhr.responseText || '{}');
+            if (xhr.status >= 200 && xhr.status < 300 && parsed.success && parsed.token) {
+              entry.token = parsed.token;
+            } else {
+              entry.error = parsed.error || 'upload failed';
+              showAttachError(entry.error);
+            }
+          } catch {
+            entry.error = 'bad response';
             showAttachError(entry.error);
           }
           renderAttachPreview();
           updateSendBtnState();
-        })
-        .catch(err => {
+        });
+
+        xhr.addEventListener('error', () => {
           entry.uploading = false;
           entry.error = 'network error';
           showAttachError('Upload failed: network error');
-          console.error('Upload failed:', err);
           renderAttachPreview();
           updateSendBtnState();
         });
+
+        xhr.send(body);
+      });
+    }
+
+    // Update progress ring directly on the DOM node for this entry —
+    // avoids re-rendering the entire preview list on every progress event.
+    function updateEntryProgress(entry) {
+      const item = attachPreview.querySelector(`[data-entry-id="${entry.id}"]`);
+      if (!item) return;
+      const indicator = item.querySelector('.upload-ring-indicator');
+      if (!indicator) return;
+      const RING_CIRC = 2 * Math.PI * 14; // matches r=14 below
+      indicator.style.strokeDashoffset = String(RING_CIRC * (1 - entry.progress));
     }
 
     function removePendingImage(id) {
@@ -1283,9 +1415,13 @@
         attachPreview.removeChild(attachPreview.firstChild);
       }
 
+      const RING_R = 14;
+      const RING_CIRC = 2 * Math.PI * RING_R;
+
       for (const entry of pendingImages) {
         const item = document.createElement('div');
         item.className = 'attach-preview-inner';
+        item.setAttribute('data-entry-id', String(entry.id));
         if (entry.uploading) item.classList.add('is-uploading');
         if (entry.error) item.classList.add('is-errored');
 
@@ -1293,6 +1429,34 @@
         img.alt = 'Attached image';
         img.src = entry.dataUrl;
         item.appendChild(img);
+
+        // Progress ring overlay (centered on the thumb). Built as SVG so
+        // the stroke-dashoffset can be updated directly on progress
+        // events without re-rendering the list. Empty ring at the
+        // start (strokeDashoffset = circumference), full ring at the end
+        // (strokeDashoffset = 0).
+        if (entry.uploading) {
+          const svgNS = 'http://www.w3.org/2000/svg';
+          const svg = document.createElementNS(svgNS, 'svg');
+          svg.setAttribute('class', 'upload-ring');
+          svg.setAttribute('viewBox', '0 0 36 36');
+          const track = document.createElementNS(svgNS, 'circle');
+          track.setAttribute('class', 'upload-ring-track');
+          track.setAttribute('cx', '18');
+          track.setAttribute('cy', '18');
+          track.setAttribute('r', String(RING_R));
+          svg.appendChild(track);
+          const indicator = document.createElementNS(svgNS, 'circle');
+          indicator.setAttribute('class', 'upload-ring-indicator');
+          indicator.setAttribute('cx', '18');
+          indicator.setAttribute('cy', '18');
+          indicator.setAttribute('r', String(RING_R));
+          indicator.setAttribute('transform', 'rotate(-90 18 18)');
+          indicator.style.strokeDasharray = String(RING_CIRC);
+          indicator.style.strokeDashoffset = String(RING_CIRC * (1 - (entry.progress || 0)));
+          svg.appendChild(indicator);
+          item.appendChild(svg);
+        }
 
         const closeBtn = document.createElement('button');
         closeBtn.className = 'attach-clear';
