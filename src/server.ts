@@ -127,6 +127,56 @@ function validateCwd(cwd: unknown): string | null {
   return cwd
 }
 
+type SaveResult =
+  | { ok: true; path: string }
+  | { ok: false; error: string }
+
+// Validate an uploaded image payload and write it to UPLOAD_DIR with a
+// server-generated UUID filename. Client's `filename` is intentionally
+// discarded — nothing client-supplied touches the filesystem, so there's
+// no path-traversal surface.
+function saveUploadedImage(payload: unknown): SaveResult {
+  if (typeof payload !== 'object' || payload === null) {
+    return { ok: false, error: 'bad payload' }
+  }
+  const { mime, base64 } = payload as Record<string, unknown>
+  if (typeof mime !== 'string' || !ALLOWED_MIME.has(mime)) {
+    return { ok: false, error: 'unsupported type' }
+  }
+  if (typeof base64 !== 'string') {
+    return { ok: false, error: 'bad payload' }
+  }
+  const bytes = Buffer.from(base64, 'base64')
+  if (bytes.length === 0) {
+    return { ok: false, error: 'empty image' }
+  }
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    return { ok: false, error: 'image too large' }
+  }
+  const ext = ALLOWED_MIME.get(mime)!
+  const id = crypto.randomUUID()
+  const dest = path.join(UPLOAD_DIR, `${id}.${ext}`)
+  try {
+    fs.writeFileSync(dest, bytes)
+  } catch (err) {
+    console.error('Failed to write upload:', err)
+    return { ok: false, error: 'write failed' }
+  }
+  return { ok: true, path: dest }
+}
+
+// Schedule a fire-and-forget delete of an uploaded file. ENOENT is fine —
+// the startup sweep may have beaten us to it after a daemon restart.
+function scheduleUnlink(filePath: string, delayMs: number): void {
+  setTimeout(() => {
+    fs.unlink(filePath, err => {
+      if (err && err.code !== 'ENOENT') {
+        console.error('Cleanup failed:', filePath, err)
+      }
+    })
+  }, delayMs)
+}
+
 const app = express()
 
 const httpServer = createServer(app)
