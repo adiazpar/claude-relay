@@ -692,6 +692,22 @@ setInterval(() => {
 // Start polling for output changes
 tmuxBridge.startPolling()
 
+// JSON error handler — catches body-parser rejections (oversized payloads,
+// malformed JSON) so clients parsing xhr.responseText always get a JSON
+// shape instead of Express's default HTML error page. Must be registered
+// AFTER all routes.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(err)
+  if (err && (err.type === 'entity.too.large' || err.statusCode === 413)) {
+    return res.status(413).json({ success: false, error: 'image too large' })
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, error: 'malformed body' })
+  }
+  console.error('Unhandled request error:', err)
+  res.status(500).json({ success: false, error: 'internal error' })
+})
+
 const PORT_RAW = process.env.PORT ?? '3001'
 const PORT = Number(PORT_RAW)
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
