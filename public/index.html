@@ -1129,6 +1129,66 @@
     const serverRestartBtn = document.getElementById('serverRestartBtn');
     const serverPortsRow = document.getElementById('serverPortsRow');
     const inputRow = document.getElementById('inputRow');
+    const attachFileInput = document.getElementById('attachFileInput');
+    const attachPreview = document.getElementById('attachPreview');
+    const attachThumb = document.getElementById('attachThumb');
+    const attachError = document.getElementById('attachError');
+
+    // Currently-staged image waiting to ride along with the next send.
+    // Cleared optimistically when the send fires (see sendMessage), or when
+    // the user taps the x on the thumbnail.
+    let pendingImage = null; // { dataUrl, mime, bytes } | null
+    const CLIENT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+    function showAttachError(msg) {
+      attachError.textContent = msg;
+      attachError.hidden = false;
+      clearTimeout(showAttachError._t);
+      showAttachError._t = setTimeout(() => { attachError.hidden = true; }, 4000);
+    }
+
+    function clearAttachError() {
+      attachError.hidden = true;
+      clearTimeout(showAttachError._t);
+    }
+
+    function handleFileSelected(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith('image/')) {
+        showAttachError('Not an image');
+        ev.target.value = '';
+        return;
+      }
+      if (file.size > CLIENT_MAX_IMAGE_BYTES) {
+        showAttachError('Image too large (max 10 MB)');
+        ev.target.value = '';
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        pendingImage = { dataUrl: reader.result, mime: file.type, bytes: file.size };
+        renderAttachPreview();
+        clearAttachError();
+      };
+      reader.readAsDataURL(file);
+      ev.target.value = ''; // allow re-picking the same file later
+    }
+
+    function clearPendingImage() {
+      pendingImage = null;
+      renderAttachPreview();
+    }
+
+    function renderAttachPreview() {
+      if (pendingImage) {
+        attachThumb.src = pendingImage.dataUrl;
+        attachPreview.hidden = false;
+      } else {
+        attachThumb.src = '';
+        attachPreview.hidden = true;
+      }
+    }
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
     // with an <svg>, so after state changes we restore the placeholder and let
