@@ -491,10 +491,11 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Send a message to Claude Code in tmux. When imagePath is provided, its
-  // absolute path is prepended to the payload so Claude Code's TUI detects
-  // it as an image attachment (same buffer content as a drag-and-drop).
-  sendMessage(message: string, target?: string, imagePath?: string): boolean {
+  // Send a message to Claude Code in tmux. When imagePaths has entries,
+  // their absolute paths are prepended space-separated to the payload so
+  // Claude Code's TUI detects them as image attachments (same buffer
+  // content as one or more drag-and-drops).
+  sendMessage(message: string, target?: string, imagePaths?: string[]): boolean {
     if (!this.sessionExists()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
@@ -504,14 +505,16 @@ export class TmuxBridge extends EventEmitter {
       return false
     }
 
+    const hasImages = !!imagePaths && imagePaths.length > 0
+
     try {
       // Typing `clear` at a shell prompt should yield a visually clean canvas
       // — not an echoed "clear" line above a fresh prompt. Translate it to
       // Ctrl-L (clears the screen without echoing a command) plus
       // clear-history (drops scrollback). Skip the translation when Claude is
       // running so "clear" still reaches Claude's own input. Also skip when
-      // an image is attached — `clear` is only meaningful as a bare command.
-      if (!imagePath && message.trim() === 'clear') {
+      // any image is attached — `clear` is only meaningful as a bare command.
+      if (!hasImages && message.trim() === 'clear') {
         try {
           const cmd = this.runTmux(['display-message', '-t', target, '-p', '#{pane_current_command}']).trim()
           if (this.isShellCommand(cmd)) {
@@ -531,8 +534,9 @@ export class TmuxBridge extends EventEmitter {
         }
       }
 
-      const payload = imagePath
-        ? (message.length > 0 ? `${imagePath} ${message}` : imagePath)
+      const prefix = hasImages ? imagePaths!.join(' ') : ''
+      const payload = hasImages
+        ? (message.length > 0 ? `${prefix} ${message}` : prefix)
         : message
 
       // -l sends literal keys; argv form means no shell quoting needed

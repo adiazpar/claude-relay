@@ -83,19 +83,27 @@ const MAX_WS_MESSAGE_BYTES = 64 * 1024
 // Max inbound message content length (characters)
 const MAX_MESSAGE_CONTENT_CHARS = 16 * 1024
 
-// Image upload constants. Files written here live for ~30 seconds — long
-// enough for Claude Code's TUI to read them and base64-encode into the API
-// request, short enough that steady state is ~empty. The startup sweep
-// further below catches anything the timer missed (daemon crash, etc).
+// Image upload constants. Uploaded files live in UPLOAD_DIR as
+// <uuid>.<ext>; that filename doubles as the token the client sends back
+// in a later /api/send request.
+//
+// Two unlink timers can be attached per file:
+//   - At upload: 10 min "orphan TTL" (user picked but never sent).
+//   - At send:   30 s "sent TTL"    (file used, get rid of it quickly).
+// Either firing first wins. The second harmlessly hits ENOENT.
+// Startup sweep is the final safety net.
 const UPLOAD_DIR = path.join(__dirname, '..', 'logs', 'uploads')
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const UPLOAD_CLEANUP_DELAY_MS = 30_000
+const UPLOAD_ORPHAN_TTL_MS = 10 * 60_000
+const MAX_ATTACHMENTS_PER_SEND = 10
 const ALLOWED_MIME = new Map<string, string>([
   ['image/png', 'png'],
   ['image/jpeg', 'jpg'],
   ['image/gif', 'gif'],
   ['image/webp', 'webp'],
 ])
+const TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(png|jpg|gif|webp)$/i
 
 // Split terminal output into raw ANSI lines
 // Client handles ANSI-to-HTML conversion for better performance
@@ -128,13 +136,14 @@ function validateCwd(cwd: unknown): string | null {
 }
 
 type SaveResult =
-  | { ok: true; path: string }
+  | { ok: true; path: string; token: string }
   | { ok: false; error: string }
 
-// Validate an uploaded image payload and write it to UPLOAD_DIR with a
-// server-generated UUID filename. Client's `filename` is intentionally
-// discarded — nothing client-supplied touches the filesystem, so there's
-// no path-traversal surface.
+// Validate an uploaded image payload and write it to UPLOAD_DIR. The
+// filename (<uuid>.<ext>) doubles as the token returned to the client —
+// the client sends that back in /api/send to reference the stored file.
+// Client's `filename` is intentionally discarded, preventing path
+// traversal via client-supplied names.
 function saveUploadedImage(payload: unknown): SaveResult {
   if (typeof payload !== 'object' || payload === null) {
     return { ok: false, error: 'bad payload' }
@@ -155,18 +164,44 @@ function saveUploadedImage(payload: unknown): SaveResult {
   }
   const ext = ALLOWED_MIME.get(mime)!
   const id = crypto.randomUUID()
-  const dest = path.join(UPLOAD_DIR, `${id}.${ext}`)
+  const token = `${id}.${ext}`
+  const dest = path.join(UPLOAD_DIR, token)
   try {
     fs.writeFileSync(dest, bytes)
   } catch (err) {
     console.error('Failed to write upload:', err)
     return { ok: false, error: 'write failed' }
   }
-  return { ok: true, path: dest }
+  return { ok: true, path: dest, token }
+}
+
+// Validate an array of tokens from the client and resolve each to a
+// filesystem path, confirming the file still exists. Any invalid or
+// missing token fails the whole batch.
+function resolveTokens(tokens: unknown):
+  | { ok: true; paths: string[] }
+  | { ok: false; error: string } {
+  if (!Array.isArray(tokens)) return { ok: false, error: 'tokens must be array' }
+  if (tokens.length === 0) return { ok: true, paths: [] }
+  if (tokens.length > MAX_ATTACHMENTS_PER_SEND) {
+    return { ok: false, error: 'too many attachments' }
+  }
+  const paths: string[] = []
+  for (const t of tokens) {
+    if (typeof t !== 'string' || !TOKEN_PATTERN.test(t)) {
+      return { ok: false, error: 'invalid token' }
+    }
+    const p = path.join(UPLOAD_DIR, t)
+    if (!fs.existsSync(p)) {
+      return { ok: false, error: 'token expired or invalid' }
+    }
+    paths.push(p)
+  }
+  return { ok: true, paths }
 }
 
 // Schedule a fire-and-forget delete of an uploaded file. ENOENT is fine —
-// the startup sweep may have beaten us to it after a daemon restart.
+// the startup sweep or a competing cleanup timer may have beaten us.
 function scheduleUnlink(filePath: string, delayMs: number): void {
   setTimeout(() => {
     fs.unlink(filePath, err => {
@@ -211,10 +246,11 @@ try {
   console.error('Failed to prepare uploads dir:', err)
 }
 
-// Route-scoped larger JSON limit specifically for /api/send so image-
-// attached sends (base64-encoded, up to ~14 MB on the wire) fit. Must
-// come BEFORE the global express.json middleware so it matches first.
-app.use('/api/send', express.json({ limit: '16mb' }))
+// Route-scoped larger JSON limit for /api/upload (one base64-encoded
+// image per request, up to ~14 MB on the wire). /api/send stays small —
+// it only carries text + token references. Must come BEFORE the global
+// middleware so it matches first for /api/upload.
+app.use('/api/upload', express.json({ limit: '16mb' }))
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
@@ -295,14 +331,27 @@ app.post('/api/clear-history', (req, res) => {
   res.json({ success })
 })
 
-// Send message via REST. Also the transport for image-attached sends
-// (those can't use the WS fast path — WS maxPayload is 64 KB). Accepts
-// optional { image: { mime, base64 } } alongside the usual message+target.
+// Upload one image. Writes <uuid>.<ext> under logs/uploads/ and returns
+// the filename as a token. Client holds the token until it sends the
+// message; at that point /api/send references the token. Orphan files
+// (uploaded but never referenced) get unlinked after UPLOAD_ORPHAN_TTL_MS.
+app.post('/api/upload', (req, res) => {
+  const result = saveUploadedImage(req.body)
+  if (!result.ok) {
+    return res.status(400).json({ success: false, error: result.error })
+  }
+  scheduleUnlink(result.path, UPLOAD_ORPHAN_TTL_MS)
+  res.json({ success: true, token: result.token })
+})
+
+// Send a message, optionally with a list of upload tokens for images the
+// client already uploaded via /api/upload. Tokens resolve to paths and
+// get typed into the pane alongside the message.
 app.post('/api/send', (req, res) => {
   const message = typeof req.body?.message === 'string' ? req.body.message : ''
-  const hasImage = !!req.body?.image
+  const hasTokens = Array.isArray(req.body?.tokens) && req.body.tokens.length > 0
 
-  if (!message && !hasImage) {
+  if (!message && !hasTokens) {
     return res.status(400).json({ success: false, error: 'Message or image required' })
   }
   if (message.length > MAX_MESSAGE_CONTENT_CHARS) {
@@ -314,17 +363,19 @@ app.post('/api/send', (req, res) => {
     return res.status(400).json({ success: false, error: 'Valid target required' })
   }
 
-  let imagePath: string | undefined
-  if (hasImage) {
-    const result = saveUploadedImage(req.body.image)
+  let imagePaths: string[] | undefined
+  if (hasTokens) {
+    const result = resolveTokens(req.body.tokens)
     if (!result.ok) {
       return res.status(400).json({ success: false, error: result.error })
     }
-    imagePath = result.path
+    imagePaths = result.paths
   }
 
-  const success = tmuxBridge.sendMessage(message, target, imagePath)
-  if (imagePath) scheduleUnlink(imagePath, UPLOAD_CLEANUP_DELAY_MS)
+  const success = tmuxBridge.sendMessage(message, target, imagePaths)
+  if (imagePaths) {
+    for (const p of imagePaths) scheduleUnlink(p, UPLOAD_CLEANUP_DELAY_MS)
+  }
 
   res.json({ success })
 })
