@@ -211,6 +211,10 @@ try {
   console.error('Failed to prepare uploads dir:', err)
 }
 
+// Route-scoped larger JSON limit specifically for /api/send so image-
+// attached sends (base64-encoded, up to ~14 MB on the wire) fit. Must
+// come BEFORE the global express.json middleware so it matches first.
+app.use('/api/send', express.json({ limit: '16mb' }))
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
@@ -291,21 +295,37 @@ app.post('/api/clear-history', (req, res) => {
   res.json({ success })
 })
 
-// Send message via REST (fallback)
+// Send message via REST. Also the transport for image-attached sends
+// (those can't use the WS fast path — WS maxPayload is 64 KB). Accepts
+// optional { image: { mime, base64 } } alongside the usual message+target.
 app.post('/api/send', (req, res) => {
-  const message = req.body?.message
-  if (typeof message !== 'string' || message.length === 0) {
-    return res.status(400).json({ error: 'Message required' })
+  const message = typeof req.body?.message === 'string' ? req.body.message : ''
+  const hasImage = !!req.body?.image
+
+  if (!message && !hasImage) {
+    return res.status(400).json({ success: false, error: 'Message or image required' })
   }
   if (message.length > MAX_MESSAGE_CONTENT_CHARS) {
-    return res.status(413).json({ error: 'Message too large' })
+    return res.status(413).json({ success: false, error: 'Message too large' })
   }
 
   const target = validatePaneTarget(req.body?.target)
   if (!target) {
-    return res.status(400).json({ error: 'Valid target required' })
+    return res.status(400).json({ success: false, error: 'Valid target required' })
   }
-  const success = tmuxBridge.sendMessage(message, target)
+
+  let imagePath: string | undefined
+  if (hasImage) {
+    const result = saveUploadedImage(req.body.image)
+    if (!result.ok) {
+      return res.status(400).json({ success: false, error: result.error })
+    }
+    imagePath = result.path
+  }
+
+  const success = tmuxBridge.sendMessage(message, target, imagePath)
+  if (imagePath) scheduleUnlink(imagePath, UPLOAD_CLEANUP_DELAY_MS)
+
   res.json({ success })
 })
 
