@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
+import crypto from 'crypto'
 import { tmuxBridge } from './tmux-bridge.js'
 import { getAllCommands } from './commands.js'
 
@@ -82,6 +83,28 @@ const MAX_WS_MESSAGE_BYTES = 64 * 1024
 // Max inbound message content length (characters)
 const MAX_MESSAGE_CONTENT_CHARS = 16 * 1024
 
+// Image upload constants. Uploaded files live in UPLOAD_DIR as
+// <uuid>.<ext>; that filename doubles as the token the client sends back
+// in a later /api/send request.
+//
+// Two unlink timers can be attached per file:
+//   - At upload: 10 min "orphan TTL" (user picked but never sent).
+//   - At send:   30 s "sent TTL"    (file used, get rid of it quickly).
+// Either firing first wins. The second harmlessly hits ENOENT.
+// Startup sweep is the final safety net.
+const UPLOAD_DIR = path.join(__dirname, '..', 'logs', 'uploads')
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const UPLOAD_CLEANUP_DELAY_MS = 30_000
+const UPLOAD_ORPHAN_TTL_MS = 10 * 60_000
+const MAX_ATTACHMENTS_PER_SEND = 10
+const ALLOWED_MIME = new Map<string, string>([
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/gif', 'gif'],
+  ['image/webp', 'webp'],
+])
+const TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(png|jpg|gif|webp)$/i
+
 // Split terminal output into raw ANSI lines
 // Client handles ANSI-to-HTML conversion for better performance
 function toLines(text: string): string[] {
@@ -112,6 +135,75 @@ function validateCwd(cwd: unknown): string | null {
   return cwd
 }
 
+type SaveResult =
+  | { ok: true; path: string; token: string }
+  | { ok: false; status: number; error: string }
+
+// Write a validated image Buffer to UPLOAD_DIR. The filename
+// (<uuid>.<ext>) doubles as the token returned to the client — the
+// client sends that back in /api/send to reference the stored file.
+// Server generates the name; nothing client-supplied touches the
+// filesystem, so there's no path-traversal surface.
+function saveUploadedBytes(bytes: Buffer, mime: string): SaveResult {
+  if (!ALLOWED_MIME.has(mime)) {
+    return { ok: false, status: 400, error: 'unsupported type' }
+  }
+  if (bytes.length === 0) {
+    return { ok: false, status: 400, error: 'empty image' }
+  }
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    return { ok: false, status: 413, error: 'image too large' }
+  }
+  const ext = ALLOWED_MIME.get(mime)!
+  const id = crypto.randomUUID()
+  const token = `${id}.${ext}`
+  const dest = path.join(UPLOAD_DIR, token)
+  try {
+    fs.writeFileSync(dest, bytes)
+  } catch (err) {
+    console.error('Failed to write upload:', err)
+    return { ok: false, status: 500, error: 'write failed' }
+  }
+  return { ok: true, path: dest, token }
+}
+
+// Validate an array of tokens from the client and resolve each to a
+// filesystem path, confirming the file still exists. Any invalid or
+// missing token fails the whole batch.
+function resolveTokens(tokens: unknown):
+  | { ok: true; paths: string[] }
+  | { ok: false; error: string } {
+  if (!Array.isArray(tokens)) return { ok: false, error: 'tokens must be array' }
+  if (tokens.length === 0) return { ok: true, paths: [] }
+  if (tokens.length > MAX_ATTACHMENTS_PER_SEND) {
+    return { ok: false, error: 'too many attachments' }
+  }
+  const paths: string[] = []
+  for (const t of tokens) {
+    if (typeof t !== 'string' || !TOKEN_PATTERN.test(t)) {
+      return { ok: false, error: 'invalid token' }
+    }
+    const p = path.join(UPLOAD_DIR, t)
+    if (!fs.existsSync(p)) {
+      return { ok: false, error: 'token expired or invalid' }
+    }
+    paths.push(p)
+  }
+  return { ok: true, paths }
+}
+
+// Schedule a fire-and-forget delete of an uploaded file. ENOENT is fine —
+// the startup sweep or a competing cleanup timer may have beaten us.
+function scheduleUnlink(filePath: string, delayMs: number): void {
+  setTimeout(() => {
+    fs.unlink(filePath, err => {
+      if (err && err.code !== 'ENOENT') {
+        console.error('Cleanup failed:', filePath, err)
+      }
+    })
+  }, delayMs)
+}
+
 const app = express()
 
 const httpServer = createServer(app)
@@ -132,6 +224,20 @@ function serializePanes() {
 
 // Serve static files
 app.use(express.static(path.join(__dirname, '..', 'public')))
+
+// Ensure uploads dir exists and is empty at startup. Catches any files
+// left over from a previous run (daemon crashed mid-upload, unlink timer
+// didn't fire). Synchronous on purpose — guarantees an empty dir before
+// we accept any requests.
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+  for (const f of fs.readdirSync(UPLOAD_DIR)) {
+    try { fs.unlinkSync(path.join(UPLOAD_DIR, f)) } catch {}
+  }
+} catch (err) {
+  console.error('Failed to prepare uploads dir:', err)
+}
+
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
@@ -212,21 +318,66 @@ app.post('/api/clear-history', (req, res) => {
   res.json({ success })
 })
 
-// Send message via REST (fallback)
+// Upload one image as a raw binary body. Content-Type header carries
+// the mime (e.g. image/jpeg). Route-scoped express.raw parses into a
+// Buffer without any JSON/base64 overhead — ~25% less bytes on the
+// wire and no parse step compared to base64-wrapped JSON.
+//
+// Writes <uuid>.<ext> under logs/uploads/ and returns the filename as
+// a token. Client holds the token until it sends the message; at that
+// point /api/send references the token. Orphan files (uploaded but
+// never referenced) get unlinked after UPLOAD_ORPHAN_TTL_MS.
+app.post(
+  '/api/upload',
+  express.raw({ type: () => true, limit: `${Math.ceil(MAX_IMAGE_BYTES / (1024 * 1024))}mb` }),
+  (req, res) => {
+    const mime = (req.header('content-type') || '').split(';')[0].trim()
+    const bytes = req.body
+    if (!Buffer.isBuffer(bytes)) {
+      return res.status(400).json({ success: false, error: 'bad payload' })
+    }
+    const result = saveUploadedBytes(bytes, mime)
+    if (!result.ok) {
+      return res.status(result.status).json({ success: false, error: result.error })
+    }
+    scheduleUnlink(result.path, UPLOAD_ORPHAN_TTL_MS)
+    res.json({ success: true, token: result.token })
+  }
+)
+
+// Send a message, optionally with a list of upload tokens for images the
+// client already uploaded via /api/upload. Tokens resolve to paths and
+// get typed into the pane alongside the message.
 app.post('/api/send', (req, res) => {
-  const message = req.body?.message
-  if (typeof message !== 'string' || message.length === 0) {
-    return res.status(400).json({ error: 'Message required' })
+  const message = typeof req.body?.message === 'string' ? req.body.message : ''
+  const hasTokens = Array.isArray(req.body?.tokens) && req.body.tokens.length > 0
+
+  if (!message && !hasTokens) {
+    return res.status(400).json({ success: false, error: 'Message or image required' })
   }
   if (message.length > MAX_MESSAGE_CONTENT_CHARS) {
-    return res.status(413).json({ error: 'Message too large' })
+    return res.status(413).json({ success: false, error: 'Message too large' })
   }
 
   const target = validatePaneTarget(req.body?.target)
   if (!target) {
-    return res.status(400).json({ error: 'Valid target required' })
+    return res.status(400).json({ success: false, error: 'Valid target required' })
   }
-  const success = tmuxBridge.sendMessage(message, target)
+
+  let imagePaths: string[] | undefined
+  if (hasTokens) {
+    const result = resolveTokens(req.body.tokens)
+    if (!result.ok) {
+      return res.status(400).json({ success: false, error: result.error })
+    }
+    imagePaths = result.paths
+  }
+
+  const success = tmuxBridge.sendMessage(message, target, imagePaths)
+  if (imagePaths) {
+    for (const p of imagePaths) scheduleUnlink(p, UPLOAD_CLEANUP_DELAY_MS)
+  }
+
   res.json({ success })
 })
 
@@ -540,6 +691,22 @@ setInterval(() => {
 
 // Start polling for output changes
 tmuxBridge.startPolling()
+
+// JSON error handler — catches body-parser rejections (oversized payloads,
+// malformed JSON) so clients parsing xhr.responseText always get a JSON
+// shape instead of Express's default HTML error page. Must be registered
+// AFTER all routes.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(err)
+  if (err && (err.type === 'entity.too.large' || err.statusCode === 413)) {
+    return res.status(413).json({ success: false, error: 'image too large' })
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, error: 'malformed body' })
+  }
+  console.error('Unhandled request error:', err)
+  res.status(500).json({ success: false, error: 'internal error' })
+})
 
 const PORT_RAW = process.env.PORT ?? '3001'
 const PORT = Number(PORT_RAW)

@@ -627,6 +627,149 @@
       user-select: none;
     }
 
+    /* Paperclip attach button, mirrors send-btn sizing but transparent. */
+    .attach-btn {
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+      border: none;
+      border-radius: 14px;
+      background: transparent;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      cursor: pointer;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      user-select: none;
+    }
+
+    .attach-btn svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    @media (hover: hover) {
+      .attach-btn:hover {
+        color: var(--text-primary);
+      }
+    }
+
+    /* Image preview row above the shortcuts row. Left padding and
+       bottom margin mirror .shortcuts-row so all three rows
+       (preview / shortcuts / input) stack with matching gutters. */
+    .attach-preview {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding-left: 4px;
+      margin-bottom: 10px;
+    }
+
+    /* UA [hidden] rule is trumped by author display:flex — restate. */
+    .attach-preview[hidden] {
+      display: none;
+    }
+
+    .attach-preview-inner {
+      position: relative;
+      width: fit-content;
+    }
+
+    /* Visible feedback while an upload is in flight (image dimmed until
+       the server returns a token). Errored uploads get a subtle red
+       border instead. */
+    .attach-preview-inner.is-uploading img {
+      opacity: 0.5;
+    }
+
+    .attach-preview-inner.is-errored img {
+      border-color: rgb(248, 113, 113);
+    }
+
+    /* Circular progress ring rendered over the image while uploading.
+       Track is the full faint circle; indicator is the bright arc that
+       grows via stroke-dashoffset updates from XHR upload events. */
+    .upload-ring {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 32px;
+      height: 32px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .upload-ring-track {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.2);
+      stroke-width: 3;
+    }
+
+    .upload-ring-indicator {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.95);
+      stroke-width: 3;
+      stroke-linecap: round;
+      /* Dasharray + dashoffset set inline via JS — depends on circle
+         circumference (2π × r). */
+    }
+
+    /* Each image wears the same 1px var(--border) as .shortcut-btn.
+       box-sizing: border-box keeps the rendered size at exactly 72×72
+       so the border replaces the outer 1px of image pixels instead of
+       expanding the element — i.e., the border paints on top of the
+       image edge. */
+    .attach-preview img {
+      width: 72px;
+      height: 72px;
+      box-sizing: border-box;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg-tertiary);
+      display: block;
+    }
+
+    .attach-clear {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.75);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .attach-clear svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .attach-error[hidden] {
+      display: none;
+    }
+
+    /* Inline error row for attach failures. */
+    .attach-error {
+      margin: 0 10px 4px;
+      padding: 6px 10px;
+      background: rgba(220, 38, 38, 0.12);
+      color: rgb(248, 113, 113);
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
     .send-btn svg {
       width: 14px;
       height: 14px;
@@ -814,6 +957,11 @@
   </div>
 
   <div class="input-area fixed-bar-bottom">
+    <!-- Thumbnail(s) of staged images. Items are rendered dynamically
+         into this container by renderAttachPreview(); hidden when empty. -->
+    <div class="attach-preview" id="attachPreview" hidden></div>
+    <!-- Inline error row for attach-related failures. -->
+    <div class="attach-error" id="attachError" hidden role="alert"></div>
     <!-- Shortcuts row -->
     <div class="shortcuts-row">
       <button class="shortcut-btn" onclick="sendKey('Escape')" title="Escape">
@@ -850,6 +998,10 @@
     <div class="server-ports-row" id="serverPortsRow"></div>
     <!-- Input row -->
     <div class="input-row" id="inputRow">
+      <button class="attach-btn" id="attachBtn" onclick="document.getElementById('attachFileInput').click()" aria-label="Attach image">
+        <i data-lucide="paperclip"></i>
+      </button>
+      <input type="file" id="attachFileInput" accept="image/*" multiple hidden onchange="handleFileSelected(event)">
       <textarea
         id="messageInput"
         placeholder="Message Claude..."
@@ -1036,6 +1188,289 @@
     const serverRestartBtn = document.getElementById('serverRestartBtn');
     const serverPortsRow = document.getElementById('serverPortsRow');
     const inputRow = document.getElementById('inputRow');
+    const attachFileInput = document.getElementById('attachFileInput');
+    const attachPreview = document.getElementById('attachPreview');
+    const attachError = document.getElementById('attachError');
+
+    // Currently-staged images waiting to ride along with the next send.
+    // Each entry: { id, dataUrl, token?, uploading, error? }. The token
+    // arrives from POST /api/upload once the file reaches the server.
+    // sendMessage bundles all entries' tokens into one /api/send POST,
+    // then clears the array.
+    let pendingImages = [];
+    let pendingImageSeq = 0;
+    const CLIENT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    const CLIENT_MAX_ATTACHMENTS = 10;
+
+    function showAttachError(msg) {
+      attachError.textContent = msg;
+      attachError.hidden = false;
+      clearTimeout(showAttachError._t);
+      showAttachError._t = setTimeout(() => { attachError.hidden = true; }, 4000);
+    }
+
+    function clearAttachError() {
+      attachError.hidden = true;
+      clearTimeout(showAttachError._t);
+    }
+
+    function handleFileSelected(ev) {
+      const files = Array.from(ev.target.files || []);
+      ev.target.value = ''; // allow re-picking the same file later
+      if (files.length === 0) return;
+
+      for (const file of files) {
+        if (pendingImages.length >= CLIENT_MAX_ATTACHMENTS) {
+          showAttachError(`Max ${CLIENT_MAX_ATTACHMENTS} attachments per message`);
+          break;
+        }
+        if (!file.type.startsWith('image/')) {
+          showAttachError(`${file.name || 'File'} is not an image`);
+          continue;
+        }
+        if (file.size > CLIENT_MAX_IMAGE_BYTES) {
+          showAttachError(`${file.name || 'Image'} is too large (max 10 MB)`);
+          continue;
+        }
+        stageFile(file);
+      }
+      clearAttachError();
+      renderAttachPreview();
+    }
+
+    // If the user picks a big image (either dimension > 1536px, or file
+    // size > 1.5 MB), resize + re-encode as JPEG at 0.80 quality. Tuned
+    // for phone-over-cellular: Claude's own API resizes to 2000px when
+    // many images are attached, so our 1536 target loses nothing Claude
+    // can actually use. Smaller images — typically screenshots already
+    // under 1.5 MB — upload untouched to preserve fidelity.
+    const COMPRESS_MAX_DIM = 1536;
+    const COMPRESS_SIZE_TRIGGER = 1.5 * 1024 * 1024;
+    const COMPRESS_QUALITY = 0.80;
+
+    function loadImageFromFile(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('decode failed')); };
+        img.src = url;
+      });
+    }
+
+    function resizeToJpeg(img, maxDim, quality) {
+      const longest = Math.max(img.width, img.height);
+      const scale = longest > maxDim ? maxDim / longest : 1;
+      const width = Math.round(img.width * scale);
+      const height = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      return new Promise((resolve, reject) => {
+        canvas.toBlob(
+          blob => blob ? resolve(blob) : reject(new Error('encode failed')),
+          'image/jpeg',
+          quality
+        );
+      });
+    }
+
+    // Decide whether to compress. Returns the Blob that should actually
+    // be uploaded (compressed JPEG or the original File, both are Blobs).
+    // The caller already has a separate preview URL from the original
+    // file, so we don't need to produce any dataUrl here.
+    async function prepareForUpload(file) {
+      const tooBig = file.size > COMPRESS_SIZE_TRIGGER;
+      let img = null;
+      try { img = await loadImageFromFile(file); } catch { img = null; }
+
+      const tooLarge = img && Math.max(img.width, img.height) > COMPRESS_MAX_DIM;
+
+      if (!tooBig && !tooLarge) return file;
+      if (!img) return file; // couldn't decode — upload original as-is
+
+      return await resizeToJpeg(img, COMPRESS_MAX_DIM, COMPRESS_QUALITY);
+    }
+
+    function stageFile(file) {
+      // Instant thumbnail via objectURL — no file read into JS memory.
+      // Browser holds a reference to the file bytes and decodes lazily.
+      const previewUrl = URL.createObjectURL(file);
+      const entry = {
+        id: ++pendingImageSeq,
+        previewUrl,
+        token: null,
+        uploading: true,
+        progress: 0,
+        error: null,
+      };
+      pendingImages.push(entry);
+      renderAttachPreview(); // thumbnail visible immediately
+
+      prepareForUpload(file)
+        .then(blob => uploadEntry(entry, blob))
+        .catch(err => {
+          console.error('Prepare failed:', err);
+          entry.uploading = false;
+          entry.error = 'read failed';
+          renderAttachPreview();
+          updateSendBtnState();
+        });
+    }
+
+    // Upload the blob as a raw binary body. The browser pulls exactly
+    // the blob's bytes onto the wire — no base64 inflation, no JSON
+    // parse, no double FileReader pass. Content-Type comes from the
+    // blob's type (set by canvas.toBlob or the original File).
+    function uploadEntry(entry, blob) {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+      xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        entry.progress = e.loaded / e.total;
+        updateEntryProgress(entry);
+      });
+
+      xhr.addEventListener('load', () => {
+        entry.uploading = false;
+        entry.progress = 1;
+        try {
+          const parsed = JSON.parse(xhr.responseText || '{}');
+          if (xhr.status >= 200 && xhr.status < 300 && parsed.success && parsed.token) {
+            entry.token = parsed.token;
+          } else {
+            entry.error = parsed.error || 'upload failed';
+            showAttachError(entry.error);
+          }
+        } catch {
+          entry.error = 'bad response';
+          showAttachError(entry.error);
+        }
+        renderAttachPreview();
+        updateSendBtnState();
+      });
+
+      xhr.addEventListener('error', () => {
+        entry.uploading = false;
+        entry.error = 'network error';
+        showAttachError('Upload failed: network error');
+        renderAttachPreview();
+        updateSendBtnState();
+      });
+
+      xhr.send(blob);
+    }
+
+    // Update progress ring directly on the DOM node for this entry —
+    // avoids re-rendering the entire preview list on every progress event.
+    function updateEntryProgress(entry) {
+      const item = attachPreview.querySelector(`[data-entry-id="${entry.id}"]`);
+      if (!item) return;
+      const indicator = item.querySelector('.upload-ring-indicator');
+      if (!indicator) return;
+      const RING_CIRC = 2 * Math.PI * 14; // matches r=14 below
+      indicator.style.strokeDashoffset = String(RING_CIRC * (1 - entry.progress));
+    }
+
+    function removePendingImage(id) {
+      const entry = pendingImages.find(p => p.id === id);
+      if (entry && entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+      pendingImages = pendingImages.filter(p => p.id !== id);
+      renderAttachPreview();
+      updateSendBtnState();
+    }
+
+    function clearPendingImages() {
+      for (const e of pendingImages) {
+        if (e.previewUrl) URL.revokeObjectURL(e.previewUrl);
+      }
+      pendingImages = [];
+      renderAttachPreview();
+      updateSendBtnState();
+    }
+
+    function renderAttachPreview() {
+      // Clear previous children without using innerHTML to avoid any
+      // XSS surface (we only ever inject from trusted local state, but
+      // explicit DOM is safer and self-documenting).
+      while (attachPreview.firstChild) {
+        attachPreview.removeChild(attachPreview.firstChild);
+      }
+
+      const RING_R = 14;
+      const RING_CIRC = 2 * Math.PI * RING_R;
+
+      for (const entry of pendingImages) {
+        const item = document.createElement('div');
+        item.className = 'attach-preview-inner';
+        item.setAttribute('data-entry-id', String(entry.id));
+        if (entry.uploading) item.classList.add('is-uploading');
+        if (entry.error) item.classList.add('is-errored');
+
+        const img = document.createElement('img');
+        img.alt = 'Attached image';
+        img.src = entry.previewUrl;
+        item.appendChild(img);
+
+        // Progress ring overlay (centered on the thumb). Built as SVG so
+        // the stroke-dashoffset can be updated directly on progress
+        // events without re-rendering the list. Empty ring at the
+        // start (strokeDashoffset = circumference), full ring at the end
+        // (strokeDashoffset = 0).
+        if (entry.uploading) {
+          const svgNS = 'http://www.w3.org/2000/svg';
+          const svg = document.createElementNS(svgNS, 'svg');
+          svg.setAttribute('class', 'upload-ring');
+          svg.setAttribute('viewBox', '0 0 36 36');
+          const track = document.createElementNS(svgNS, 'circle');
+          track.setAttribute('class', 'upload-ring-track');
+          track.setAttribute('cx', '18');
+          track.setAttribute('cy', '18');
+          track.setAttribute('r', String(RING_R));
+          svg.appendChild(track);
+          const indicator = document.createElementNS(svgNS, 'circle');
+          indicator.setAttribute('class', 'upload-ring-indicator');
+          indicator.setAttribute('cx', '18');
+          indicator.setAttribute('cy', '18');
+          indicator.setAttribute('r', String(RING_R));
+          indicator.setAttribute('transform', 'rotate(-90 18 18)');
+          indicator.style.strokeDasharray = String(RING_CIRC);
+          indicator.style.strokeDashoffset = String(RING_CIRC * (1 - (entry.progress || 0)));
+          svg.appendChild(indicator);
+          item.appendChild(svg);
+        }
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'attach-clear';
+        closeBtn.setAttribute('aria-label', 'Remove image');
+        closeBtn.addEventListener('click', () => removePendingImage(entry.id));
+        const icon = document.createElement('i');
+        icon.setAttribute('data-lucide', 'x');
+        closeBtn.appendChild(icon);
+        item.appendChild(closeBtn);
+
+        attachPreview.appendChild(item);
+      }
+
+      attachPreview.hidden = pendingImages.length === 0;
+      if (window.lucide) lucide.createIcons();
+
+      // Input-area height changed — recompute the terminal's bottom
+      // padding so the last line of output isn't hidden behind the row.
+      if (typeof updateOutputPadding === 'function') {
+        updateOutputPadding();
+      }
+    }
+
+    function updateSendBtnState() {
+      // Disable send while any upload is in flight.
+      const anyUploading = pendingImages.some(p => p.uploading);
+      if (sendBtn) sendBtn.disabled = anyUploading;
+    }
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
     // with an <svg>, so after state changes we restore the placeholder and let
@@ -2199,11 +2634,51 @@
 
     function sendMessage() {
       const message = messageInput.value.trim();
-      if (!message) return;
 
-      // Optimistic UI: clear input immediately
+      // Refuse to send while any upload is still in flight — sending now
+      // would silently drop the still-uploading images from the message,
+      // which is confusing UX. Better to no-op until they finish.
+      if (pendingImages.some(p => p.uploading)) return;
+
+      // Collect tokens from uploaded entries only. Errored entries are
+      // skipped (user sees the red border and can retry/remove).
+      const tokens = pendingImages
+        .filter(p => p.token && !p.error)
+        .map(p => p.token);
+
+      if (!message && tokens.length === 0) return;
+
+      // Optimistic UI: clear input and thumbnails immediately.
       messageInput.value = '';
       messageInput.style.height = 'auto';
+      clearPendingImages();
+
+      // Image-attached sends go through POST (the WS hot path is unchanged
+      // for text-only and keys). The tokens payload is tiny — just string
+      // IDs — so the 16 KB-scale global JSON limit is plenty.
+      if (tokens.length > 0) {
+        fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message,
+            target: activePaneTarget,
+            tokens,
+          })
+        })
+          .then(res => res.json())
+          .then(data => {
+            if (!data.success) {
+              showAttachError(data.error || 'Send failed');
+            }
+            scheduleResumeSync('sendMessage');
+          })
+          .catch(err => {
+            console.error('Image send failed:', err);
+            showAttachError('Network error');
+          });
+        return;
+      }
 
       if (isSocketUsable()) {
         ws.send(JSON.stringify({ type: 'send', content: message }));
@@ -2253,7 +2728,12 @@
 
     // Handle send button click
     function handleSendButton() {
-      if (messageInput.value.trim().length > 0) {
+      // Ignore clicks while any upload is still in flight — the button
+      // is disabled in that state but a keyboard shortcut could still
+      // fire this.
+      if (pendingImages.some(p => p.uploading)) return;
+      const hasReadyImage = pendingImages.some(p => p.token && !p.error);
+      if (messageInput.value.trim().length > 0 || hasReadyImage) {
         sendMessage();
       }
     }
