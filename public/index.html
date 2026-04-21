@@ -657,24 +657,20 @@
       }
     }
 
-    /* Thumbnail preview shown above the shortcuts row when an image is
-       staged. Uses an `.is-open` class (not the `hidden` attribute) so
-       height and opacity can transition — CSS can't animate across
-       `display: none`. Collapsed by default: no height, no padding,
-       image opacity 0. */
+    /* Image preview row above the shortcuts row. Left padding and
+       bottom margin mirror .shortcuts-row so all three rows
+       (preview / shortcuts / input) stack with matching gutters. */
     .attach-preview {
-      max-height: 0;
-      padding: 0 14px;
-      overflow: hidden;
-      transition:
-        max-height 200ms ease,
-        padding-top 200ms ease,
-        padding-bottom 200ms ease;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding-left: 4px;
+      margin-bottom: 10px;
     }
 
-    .attach-preview.is-open {
-      max-height: 120px;
-      padding: 10px 14px 6px;
+    /* UA [hidden] rule is trumped by author display:flex — restate. */
+    .attach-preview[hidden] {
+      display: none;
     }
 
     .attach-preview-inner {
@@ -682,19 +678,20 @@
       width: fit-content;
     }
 
+    /* Each image wears the same 1px var(--border) as .shortcut-btn.
+       box-sizing: border-box keeps the rendered size at exactly 72×72
+       so the border replaces the outer 1px of image pixels instead of
+       expanding the element — i.e., the border paints on top of the
+       image edge. */
     .attach-preview img {
       width: 72px;
       height: 72px;
+      box-sizing: border-box;
       object-fit: cover;
+      border: 1px solid var(--border);
       border-radius: 10px;
+      background: var(--bg-tertiary);
       display: block;
-      opacity: 0;
-      transition: opacity 150ms ease;
-    }
-
-    .attach-preview.is-open img {
-      opacity: 1;
-      transition-delay: 100ms; /* let height finish expanding first */
     }
 
     .attach-clear {
@@ -719,9 +716,6 @@
       height: 12px;
     }
 
-    /* Error row stays simple — no animation needed, shows briefly on
-       validation failure. Restore [hidden] behavior trumped by any
-       later display rule. */
     .attach-error[hidden] {
       display: none;
     }
@@ -924,10 +918,8 @@
   </div>
 
   <div class="input-area fixed-bar-bottom">
-    <!-- Thumbnail of staged image. Uses an .is-open class rather than the
-         `hidden` attribute so we can animate height + opacity. Default
-         state is collapsed + invisible. -->
-    <div class="attach-preview" id="attachPreview">
+    <!-- Thumbnail of staged image. Hidden until JS sets pendingImage. -->
+    <div class="attach-preview" id="attachPreview" hidden>
       <div class="attach-preview-inner">
         <img id="attachThumb" alt="Attached image preview">
         <button class="attach-clear" onclick="clearPendingImage()" aria-label="Remove image">
@@ -1217,28 +1209,17 @@
     function renderAttachPreview() {
       if (pendingImage) {
         attachThumb.src = pendingImage.dataUrl;
-        attachPreview.classList.add('is-open');
+        attachPreview.hidden = false;
       } else {
-        attachPreview.classList.remove('is-open');
-        // Leave the src until the collapse transition finishes so the
-        // image fades out smoothly. The transitionend listener below
-        // clears it once the preview is closed.
-      }
-    }
-
-    // When the preview finishes expanding/collapsing, update the output-
-    // area padding so the terminal content isn't hidden underneath the
-    // now-taller (or shorter) input-area. Also clear the stale thumb src
-    // once collapse finishes, to free the decoded bitmap.
-    attachPreview.addEventListener('transitionend', (e) => {
-      if (e.propertyName !== 'max-height') return;
-      if (!pendingImage) {
         attachThumb.src = '';
+        attachPreview.hidden = true;
       }
+      // Input-area height changed — recompute the terminal's bottom
+      // padding so the last line of output isn't hidden behind the row.
       if (typeof updateOutputPadding === 'function') {
         updateOutputPadding();
       }
-    });
+    }
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
     // with an <svg>, so after state changes we restore the placeholder and let
