@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
+import crypto from 'crypto'
 import { tmuxBridge } from './tmux-bridge.js'
 import { getAllCommands } from './commands.js'
 
@@ -82,6 +83,20 @@ const MAX_WS_MESSAGE_BYTES = 64 * 1024
 // Max inbound message content length (characters)
 const MAX_MESSAGE_CONTENT_CHARS = 16 * 1024
 
+// Image upload constants. Files written here live for ~30 seconds — long
+// enough for Claude Code's TUI to read them and base64-encode into the API
+// request, short enough that steady state is ~empty. The startup sweep
+// further below catches anything the timer missed (daemon crash, etc).
+const UPLOAD_DIR = path.join(__dirname, '..', 'logs', 'uploads')
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const UPLOAD_CLEANUP_DELAY_MS = 30_000
+const ALLOWED_MIME = new Map<string, string>([
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/gif', 'gif'],
+  ['image/webp', 'webp'],
+])
+
 // Split terminal output into raw ANSI lines
 // Client handles ANSI-to-HTML conversion for better performance
 function toLines(text: string): string[] {
@@ -132,6 +147,20 @@ function serializePanes() {
 
 // Serve static files
 app.use(express.static(path.join(__dirname, '..', 'public')))
+
+// Ensure uploads dir exists and is empty at startup. Catches any files
+// left over from a previous run (daemon crashed mid-upload, unlink timer
+// didn't fire). Synchronous on purpose — guarantees an empty dir before
+// we accept any requests.
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+  for (const f of fs.readdirSync(UPLOAD_DIR)) {
+    try { fs.unlinkSync(path.join(UPLOAD_DIR, f)) } catch {}
+  }
+} catch (err) {
+  console.error('Failed to prepare uploads dir:', err)
+}
+
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
