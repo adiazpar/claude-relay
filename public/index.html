@@ -657,13 +657,22 @@
       }
     }
 
-    /* Thumbnail preview shown above input-row when an image is staged. */
+    /* Thumbnail preview shown above input-row when an image is staged.
+       The [hidden] override is deliberate: the UA stylesheet's
+       [hidden] { display: none } rule is trumped by any author
+       display property, so we restate it explicitly. Same applies to
+       .attach-error below. */
     .attach-preview {
       display: flex;
       align-items: flex-start;
       padding: 6px 10px 4px;
       position: relative;
       width: fit-content;
+    }
+
+    .attach-preview[hidden],
+    .attach-error[hidden] {
+      display: none;
     }
 
     .attach-preview img {
