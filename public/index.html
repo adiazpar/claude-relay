@@ -657,22 +657,29 @@
       }
     }
 
-    /* Thumbnail preview shown above input-row when an image is staged.
-       The [hidden] override is deliberate: the UA stylesheet's
-       [hidden] { display: none } rule is trumped by any author
-       display property, so we restate it explicitly. Same applies to
-       .attach-error below. */
+    /* Thumbnail preview shown above the shortcuts row when an image is
+       staged. Uses an `.is-open` class (not the `hidden` attribute) so
+       height and opacity can transition — CSS can't animate across
+       `display: none`. Collapsed by default: no height, no padding,
+       image opacity 0. */
     .attach-preview {
-      display: flex;
-      align-items: flex-start;
-      padding: 6px 10px 4px;
-      position: relative;
-      width: fit-content;
+      max-height: 0;
+      padding: 0 14px;
+      overflow: hidden;
+      transition:
+        max-height 200ms ease,
+        padding-top 200ms ease,
+        padding-bottom 200ms ease;
     }
 
-    .attach-preview[hidden],
-    .attach-error[hidden] {
-      display: none;
+    .attach-preview.is-open {
+      max-height: 120px;
+      padding: 10px 14px 6px;
+    }
+
+    .attach-preview-inner {
+      position: relative;
+      width: fit-content;
     }
 
     .attach-preview img {
@@ -681,18 +688,25 @@
       object-fit: cover;
       border-radius: 10px;
       display: block;
+      opacity: 0;
+      transition: opacity 150ms ease;
+    }
+
+    .attach-preview.is-open img {
+      opacity: 1;
+      transition-delay: 100ms; /* let height finish expanding first */
     }
 
     .attach-clear {
       position: absolute;
-      top: 0;
-      right: 2px;
-      width: 20px;
-      height: 20px;
+      top: -6px;
+      right: -6px;
+      width: 22px;
+      height: 22px;
       padding: 0;
       border: none;
       border-radius: 50%;
-      background: rgba(0, 0, 0, 0.7);
+      background: rgba(0, 0, 0, 0.75);
       color: #fff;
       display: flex;
       align-items: center;
@@ -703,6 +717,13 @@
     .attach-clear svg {
       width: 12px;
       height: 12px;
+    }
+
+    /* Error row stays simple — no animation needed, shows briefly on
+       validation failure. Restore [hidden] behavior trumped by any
+       later display rule. */
+    .attach-error[hidden] {
+      display: none;
     }
 
     /* Inline error row for attach failures. */
@@ -903,6 +924,19 @@
   </div>
 
   <div class="input-area fixed-bar-bottom">
+    <!-- Thumbnail of staged image. Uses an .is-open class rather than the
+         `hidden` attribute so we can animate height + opacity. Default
+         state is collapsed + invisible. -->
+    <div class="attach-preview" id="attachPreview">
+      <div class="attach-preview-inner">
+        <img id="attachThumb" alt="Attached image preview">
+        <button class="attach-clear" onclick="clearPendingImage()" aria-label="Remove image">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+    </div>
+    <!-- Inline error row for attach-related failures. -->
+    <div class="attach-error" id="attachError" hidden role="alert"></div>
     <!-- Shortcuts row -->
     <div class="shortcuts-row">
       <button class="shortcut-btn" onclick="sendKey('Escape')" title="Escape">
@@ -937,15 +971,6 @@
     </div>
     <!-- Server ports row - swapped in for the input when a dev server is running -->
     <div class="server-ports-row" id="serverPortsRow"></div>
-    <!-- Inline error row for attach-related failures (hidden unless shown) -->
-    <div class="attach-error" id="attachError" hidden role="alert"></div>
-    <!-- Thumbnail of staged image (hidden unless pendingImage is set) -->
-    <div class="attach-preview" id="attachPreview" hidden>
-      <img id="attachThumb" alt="Attached image preview">
-      <button class="attach-clear" onclick="clearPendingImage()" aria-label="Remove image">
-        <i data-lucide="x"></i>
-      </button>
-    </div>
     <!-- Input row -->
     <div class="input-row" id="inputRow">
       <button class="attach-btn" id="attachBtn" onclick="document.getElementById('attachFileInput').click()" aria-label="Attach image">
@@ -1192,12 +1217,28 @@
     function renderAttachPreview() {
       if (pendingImage) {
         attachThumb.src = pendingImage.dataUrl;
-        attachPreview.hidden = false;
+        attachPreview.classList.add('is-open');
       } else {
-        attachThumb.src = '';
-        attachPreview.hidden = true;
+        attachPreview.classList.remove('is-open');
+        // Leave the src until the collapse transition finishes so the
+        // image fades out smoothly. The transitionend listener below
+        // clears it once the preview is closed.
       }
     }
+
+    // When the preview finishes expanding/collapsing, update the output-
+    // area padding so the terminal content isn't hidden underneath the
+    // now-taller (or shorter) input-area. Also clear the stale thumb src
+    // once collapse finishes, to free the decoded bitmap.
+    attachPreview.addEventListener('transitionend', (e) => {
+      if (e.propertyName !== 'max-height') return;
+      if (!pendingImage) {
+        attachThumb.src = '';
+      }
+      if (typeof updateOutputPadding === 'function') {
+        updateOutputPadding();
+      }
+    });
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
     // with an <svg>, so after state changes we restore the placeholder and let
