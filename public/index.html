@@ -1238,13 +1238,15 @@
       renderAttachPreview();
     }
 
-    // If the user picks a big image (either dimension > 2048px, or file
-    // size > 2 MB), resize + re-encode as JPEG at 0.85 quality. For
-    // smaller images — typically screenshots already well under 2 MB —
-    // we upload the original file untouched to preserve fidelity.
-    const COMPRESS_MAX_DIM = 2048;
-    const COMPRESS_SIZE_TRIGGER = 2 * 1024 * 1024;
-    const COMPRESS_QUALITY = 0.85;
+    // If the user picks a big image (either dimension > 1536px, or file
+    // size > 1.5 MB), resize + re-encode as JPEG at 0.80 quality. Tuned
+    // for phone-over-cellular: Claude's own API resizes to 2000px when
+    // many images are attached, so our 1536 target loses nothing Claude
+    // can actually use. Smaller images — typically screenshots already
+    // under 1.5 MB — upload untouched to preserve fidelity.
+    const COMPRESS_MAX_DIM = 1536;
+    const COMPRESS_SIZE_TRIGGER = 1.5 * 1024 * 1024;
+    const COMPRESS_QUALITY = 0.80;
 
     function loadImageFromFile(file) {
       return new Promise((resolve, reject) => {
