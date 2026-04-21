@@ -18,6 +18,9 @@ keep coding from their phone without giving up their local environment.
   server's URL in a new browser tab.
 - **Stop/Restart** detected servers from the mobile UI. Preserves your
   exact invocation (`npm run dev`, `python app.py`, whatever you typed).
+- **Attach images**: tap the paperclip to send photos or screenshots
+  alongside your message. Works with Claude Code's native vision —
+  images are compressed client-side and uploaded in parallel.
 - **Self-healing**: the LaunchAgent (macOS) or systemd user service
   (Linux) restarts the relay on crash. If tmux itself dies, the next
   500ms poll creates a fresh session and the phone reconnects.
