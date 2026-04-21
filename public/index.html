@@ -678,6 +678,17 @@
       width: fit-content;
     }
 
+    /* Visible feedback while an upload is in flight (image dimmed until
+       the server returns a token). Errored uploads get a subtle red
+       border instead. */
+    .attach-preview-inner.is-uploading img {
+      opacity: 0.5;
+    }
+
+    .attach-preview-inner.is-errored img {
+      border-color: rgb(248, 113, 113);
+    }
+
     /* Each image wears the same 1px var(--border) as .shortcut-btn.
        box-sizing: border-box keeps the rendered size at exactly 72×72
        so the border replaces the outer 1px of image pixels instead of
@@ -918,15 +929,9 @@
   </div>
 
   <div class="input-area fixed-bar-bottom">
-    <!-- Thumbnail of staged image. Hidden until JS sets pendingImage. -->
-    <div class="attach-preview" id="attachPreview" hidden>
-      <div class="attach-preview-inner">
-        <img id="attachThumb" alt="Attached image preview">
-        <button class="attach-clear" onclick="clearPendingImage()" aria-label="Remove image">
-          <i data-lucide="x"></i>
-        </button>
-      </div>
-    </div>
+    <!-- Thumbnail(s) of staged images. Items are rendered dynamically
+         into this container by renderAttachPreview(); hidden when empty. -->
+    <div class="attach-preview" id="attachPreview" hidden></div>
     <!-- Inline error row for attach-related failures. -->
     <div class="attach-error" id="attachError" hidden role="alert"></div>
     <!-- Shortcuts row -->
@@ -968,7 +973,7 @@
       <button class="attach-btn" id="attachBtn" onclick="document.getElementById('attachFileInput').click()" aria-label="Attach image">
         <i data-lucide="paperclip"></i>
       </button>
-      <input type="file" id="attachFileInput" accept="image/*" hidden onchange="handleFileSelected(event)">
+      <input type="file" id="attachFileInput" accept="image/*" multiple hidden onchange="handleFileSelected(event)">
       <textarea
         id="messageInput"
         placeholder="Message Claude..."
@@ -1157,14 +1162,17 @@
     const inputRow = document.getElementById('inputRow');
     const attachFileInput = document.getElementById('attachFileInput');
     const attachPreview = document.getElementById('attachPreview');
-    const attachThumb = document.getElementById('attachThumb');
     const attachError = document.getElementById('attachError');
 
-    // Currently-staged image waiting to ride along with the next send.
-    // Cleared optimistically when the send fires (see sendMessage), or when
-    // the user taps the x on the thumbnail.
-    let pendingImage = null; // { dataUrl, mime, bytes } | null
+    // Currently-staged images waiting to ride along with the next send.
+    // Each entry: { id, dataUrl, token?, uploading, error? }. The token
+    // arrives from POST /api/upload once the file reaches the server.
+    // sendMessage bundles all entries' tokens into one /api/send POST,
+    // then clears the array.
+    let pendingImages = [];
+    let pendingImageSeq = 0;
     const CLIENT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    const CLIENT_MAX_ATTACHMENTS = 10;
 
     function showAttachError(msg) {
       attachError.textContent = msg;
@@ -1179,46 +1187,139 @@
     }
 
     function handleFileSelected(ev) {
-      const file = ev.target.files && ev.target.files[0];
-      if (!file) return;
-      if (!file.type.startsWith('image/')) {
-        showAttachError('Not an image');
-        ev.target.value = '';
-        return;
-      }
-      if (file.size > CLIENT_MAX_IMAGE_BYTES) {
-        showAttachError('Image too large (max 10 MB)');
-        ev.target.value = '';
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        pendingImage = { dataUrl: reader.result, mime: file.type, bytes: file.size };
-        renderAttachPreview();
-        clearAttachError();
-      };
-      reader.readAsDataURL(file);
+      const files = Array.from(ev.target.files || []);
       ev.target.value = ''; // allow re-picking the same file later
-    }
+      if (files.length === 0) return;
 
-    function clearPendingImage() {
-      pendingImage = null;
+      for (const file of files) {
+        if (pendingImages.length >= CLIENT_MAX_ATTACHMENTS) {
+          showAttachError(`Max ${CLIENT_MAX_ATTACHMENTS} attachments per message`);
+          break;
+        }
+        if (!file.type.startsWith('image/')) {
+          showAttachError(`${file.name || 'File'} is not an image`);
+          continue;
+        }
+        if (file.size > CLIENT_MAX_IMAGE_BYTES) {
+          showAttachError(`${file.name || 'Image'} is too large (max 10 MB)`);
+          continue;
+        }
+        stageFile(file);
+      }
+      clearAttachError();
       renderAttachPreview();
     }
 
+    function stageFile(file) {
+      const entry = {
+        id: ++pendingImageSeq,
+        dataUrl: '',
+        token: null,
+        uploading: true,
+        error: null,
+      };
+      pendingImages.push(entry);
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        entry.dataUrl = reader.result;
+        renderAttachPreview();
+        uploadEntry(entry, file.type);
+      };
+      reader.onerror = () => {
+        entry.uploading = false;
+        entry.error = 'read failed';
+        renderAttachPreview();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function uploadEntry(entry, mime) {
+      const base64 = (entry.dataUrl.split(',')[1]) || '';
+      fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mime, base64 }),
+      })
+        .then(res => res.json().then(body => ({ ok: res.ok, body })))
+        .then(({ ok, body }) => {
+          entry.uploading = false;
+          if (ok && body.success && body.token) {
+            entry.token = body.token;
+          } else {
+            entry.error = body.error || 'upload failed';
+            showAttachError(entry.error);
+          }
+          renderAttachPreview();
+          updateSendBtnState();
+        })
+        .catch(err => {
+          entry.uploading = false;
+          entry.error = 'network error';
+          showAttachError('Upload failed: network error');
+          console.error('Upload failed:', err);
+          renderAttachPreview();
+          updateSendBtnState();
+        });
+    }
+
+    function removePendingImage(id) {
+      pendingImages = pendingImages.filter(p => p.id !== id);
+      renderAttachPreview();
+      updateSendBtnState();
+    }
+
+    function clearPendingImages() {
+      pendingImages = [];
+      renderAttachPreview();
+      updateSendBtnState();
+    }
+
     function renderAttachPreview() {
-      if (pendingImage) {
-        attachThumb.src = pendingImage.dataUrl;
-        attachPreview.hidden = false;
-      } else {
-        attachThumb.src = '';
-        attachPreview.hidden = true;
+      // Clear previous children without using innerHTML to avoid any
+      // XSS surface (we only ever inject from trusted local state, but
+      // explicit DOM is safer and self-documenting).
+      while (attachPreview.firstChild) {
+        attachPreview.removeChild(attachPreview.firstChild);
       }
+
+      for (const entry of pendingImages) {
+        const item = document.createElement('div');
+        item.className = 'attach-preview-inner';
+        if (entry.uploading) item.classList.add('is-uploading');
+        if (entry.error) item.classList.add('is-errored');
+
+        const img = document.createElement('img');
+        img.alt = 'Attached image';
+        img.src = entry.dataUrl;
+        item.appendChild(img);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'attach-clear';
+        closeBtn.setAttribute('aria-label', 'Remove image');
+        closeBtn.addEventListener('click', () => removePendingImage(entry.id));
+        const icon = document.createElement('i');
+        icon.setAttribute('data-lucide', 'x');
+        closeBtn.appendChild(icon);
+        item.appendChild(closeBtn);
+
+        attachPreview.appendChild(item);
+      }
+
+      attachPreview.hidden = pendingImages.length === 0;
+      if (window.lucide) lucide.createIcons();
+
       // Input-area height changed — recompute the terminal's bottom
       // padding so the last line of output isn't hidden behind the row.
       if (typeof updateOutputPadding === 'function') {
         updateOutputPadding();
       }
+    }
+
+    function updateSendBtnState() {
+      // Disable send while any upload is in flight.
+      const anyUploading = pendingImages.some(p => p.uploading);
+      if (sendBtn) sendBtn.disabled = anyUploading;
     }
 
     // Swap the Lucide icon inside #modeActionBtn. Lucide replaces <i data-lucide>
@@ -2383,30 +2484,36 @@
 
     function sendMessage() {
       const message = messageInput.value.trim();
-      if (!message && !pendingImage) return;
 
-      // Snapshot the image before we clear state, so we can still send it
-      // even though the thumbnail disappears optimistically.
-      const imageToSend = pendingImage;
+      // Refuse to send while any upload is still in flight — sending now
+      // would silently drop the still-uploading images from the message,
+      // which is confusing UX. Better to no-op until they finish.
+      if (pendingImages.some(p => p.uploading)) return;
 
-      // Optimistic UI: clear input and thumbnail immediately
+      // Collect tokens from uploaded entries only. Errored entries are
+      // skipped (user sees the red border and can retry/remove).
+      const tokens = pendingImages
+        .filter(p => p.token && !p.error)
+        .map(p => p.token);
+
+      if (!message && tokens.length === 0) return;
+
+      // Optimistic UI: clear input and thumbnails immediately.
       messageInput.value = '';
       messageInput.style.height = 'auto';
-      clearPendingImage();
+      clearPendingImages();
 
-      // Image-attached sends can't use WS — the WS maxPayload is 64 KB,
-      // nowhere near enough for a 10 MB image. Always go through POST.
-      if (imageToSend) {
+      // Image-attached sends go through POST (the WS hot path is unchanged
+      // for text-only and keys). The tokens payload is tiny — just string
+      // IDs — so the 16 KB-scale global JSON limit is plenty.
+      if (tokens.length > 0) {
         fetch('/api/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message,
             target: activePaneTarget,
-            image: {
-              mime: imageToSend.mime,
-              base64: imageToSend.dataUrl.split(',')[1],
-            },
+            tokens,
           })
         })
           .then(res => res.json())
@@ -2471,7 +2578,12 @@
 
     // Handle send button click
     function handleSendButton() {
-      if (messageInput.value.trim().length > 0 || pendingImage) {
+      // Ignore clicks while any upload is still in flight — the button
+      // is disabled in that state but a keyboard shortcut could still
+      // fire this.
+      if (pendingImages.some(p => p.uploading)) return;
+      const hasReadyImage = pendingImages.some(p => p.token && !p.error);
+      if (messageInput.value.trim().length > 0 || hasReadyImage) {
         sendMessage();
       }
     }
