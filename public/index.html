@@ -1275,17 +1275,10 @@
       });
     }
 
-    function readBlobAsDataUrl(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(reader.error || new Error('read failed'));
-        reader.readAsDataURL(blob);
-      });
-    }
-
-    // Decide whether to compress. Returns { blob, mime, dataUrl } with the
-    // bytes that should actually be uploaded (compressed or original).
+    // Decide whether to compress. Returns the Blob that should actually
+    // be uploaded (compressed JPEG or the original File, both are Blobs).
+    // The caller already has a separate preview URL from the original
+    // file, so we don't need to produce any dataUrl here.
     async function prepareForUpload(file) {
       const tooBig = file.size > COMPRESS_SIZE_TRIGGER;
       let img = null;
@@ -1293,40 +1286,29 @@
 
       const tooLarge = img && Math.max(img.width, img.height) > COMPRESS_MAX_DIM;
 
-      if (!tooBig && !tooLarge) {
-        const dataUrl = await readBlobAsDataUrl(file);
-        return { blob: file, mime: file.type, dataUrl };
-      }
+      if (!tooBig && !tooLarge) return file;
+      if (!img) return file; // couldn't decode — upload original as-is
 
-      if (!img) {
-        // File is big but we couldn't decode it — fall back to original.
-        const dataUrl = await readBlobAsDataUrl(file);
-        return { blob: file, mime: file.type, dataUrl };
-      }
-
-      const jpegBlob = await resizeToJpeg(img, COMPRESS_MAX_DIM, COMPRESS_QUALITY);
-      const dataUrl = await readBlobAsDataUrl(jpegBlob);
-      return { blob: jpegBlob, mime: 'image/jpeg', dataUrl };
+      return await resizeToJpeg(img, COMPRESS_MAX_DIM, COMPRESS_QUALITY);
     }
 
     function stageFile(file) {
+      // Instant thumbnail via objectURL — no file read into JS memory.
+      // Browser holds a reference to the file bytes and decodes lazily.
+      const previewUrl = URL.createObjectURL(file);
       const entry = {
         id: ++pendingImageSeq,
-        dataUrl: '',
+        previewUrl,
         token: null,
         uploading: true,
         progress: 0,
         error: null,
       };
       pendingImages.push(entry);
-      renderAttachPreview();
+      renderAttachPreview(); // thumbnail visible immediately
 
       prepareForUpload(file)
-        .then(({ blob, mime, dataUrl }) => {
-          entry.dataUrl = dataUrl;
-          renderAttachPreview();
-          uploadEntry(entry, blob, mime);
-        })
+        .then(blob => uploadEntry(entry, blob))
         .catch(err => {
           console.error('Prepare failed:', err);
           entry.uploading = false;
@@ -1336,52 +1318,49 @@
         });
     }
 
-    // Upload via XHR so we can show real upload progress — fetch() doesn't
-    // expose upload.onprogress. The body is still base64 JSON to match the
-    // server's existing /api/upload shape.
-    function uploadEntry(entry, blob, mime) {
-      readBlobAsDataUrl(blob).then(dataUrl => {
-        const base64 = (dataUrl.split(',')[1]) || '';
-        const body = JSON.stringify({ mime, base64 });
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/upload');
-        xhr.setRequestHeader('Content-Type', 'application/json');
+    // Upload the blob as a raw binary body. The browser pulls exactly
+    // the blob's bytes onto the wire — no base64 inflation, no JSON
+    // parse, no double FileReader pass. Content-Type comes from the
+    // blob's type (set by canvas.toBlob or the original File).
+    function uploadEntry(entry, blob) {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+      xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
 
-        xhr.upload.addEventListener('progress', (e) => {
-          if (!e.lengthComputable) return;
-          entry.progress = e.loaded / e.total;
-          updateEntryProgress(entry);
-        });
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        entry.progress = e.loaded / e.total;
+        updateEntryProgress(entry);
+      });
 
-        xhr.addEventListener('load', () => {
-          entry.uploading = false;
-          entry.progress = 1;
-          try {
-            const parsed = JSON.parse(xhr.responseText || '{}');
-            if (xhr.status >= 200 && xhr.status < 300 && parsed.success && parsed.token) {
-              entry.token = parsed.token;
-            } else {
-              entry.error = parsed.error || 'upload failed';
-              showAttachError(entry.error);
-            }
-          } catch {
-            entry.error = 'bad response';
+      xhr.addEventListener('load', () => {
+        entry.uploading = false;
+        entry.progress = 1;
+        try {
+          const parsed = JSON.parse(xhr.responseText || '{}');
+          if (xhr.status >= 200 && xhr.status < 300 && parsed.success && parsed.token) {
+            entry.token = parsed.token;
+          } else {
+            entry.error = parsed.error || 'upload failed';
             showAttachError(entry.error);
           }
-          renderAttachPreview();
-          updateSendBtnState();
-        });
-
-        xhr.addEventListener('error', () => {
-          entry.uploading = false;
-          entry.error = 'network error';
-          showAttachError('Upload failed: network error');
-          renderAttachPreview();
-          updateSendBtnState();
-        });
-
-        xhr.send(body);
+        } catch {
+          entry.error = 'bad response';
+          showAttachError(entry.error);
+        }
+        renderAttachPreview();
+        updateSendBtnState();
       });
+
+      xhr.addEventListener('error', () => {
+        entry.uploading = false;
+        entry.error = 'network error';
+        showAttachError('Upload failed: network error');
+        renderAttachPreview();
+        updateSendBtnState();
+      });
+
+      xhr.send(blob);
     }
 
     // Update progress ring directly on the DOM node for this entry —
@@ -1396,12 +1375,17 @@
     }
 
     function removePendingImage(id) {
+      const entry = pendingImages.find(p => p.id === id);
+      if (entry && entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
       pendingImages = pendingImages.filter(p => p.id !== id);
       renderAttachPreview();
       updateSendBtnState();
     }
 
     function clearPendingImages() {
+      for (const e of pendingImages) {
+        if (e.previewUrl) URL.revokeObjectURL(e.previewUrl);
+      }
       pendingImages = [];
       renderAttachPreview();
       updateSendBtnState();
@@ -1427,7 +1411,7 @@
 
         const img = document.createElement('img');
         img.alt = 'Attached image';
-        img.src = entry.dataUrl;
+        img.src = entry.previewUrl;
         item.appendChild(img);
 
         // Progress ring overlay (centered on the thumb). Built as SVG so

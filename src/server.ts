@@ -137,30 +137,22 @@ function validateCwd(cwd: unknown): string | null {
 
 type SaveResult =
   | { ok: true; path: string; token: string }
-  | { ok: false; error: string }
+  | { ok: false; status: number; error: string }
 
-// Validate an uploaded image payload and write it to UPLOAD_DIR. The
-// filename (<uuid>.<ext>) doubles as the token returned to the client —
-// the client sends that back in /api/send to reference the stored file.
-// Client's `filename` is intentionally discarded, preventing path
-// traversal via client-supplied names.
-function saveUploadedImage(payload: unknown): SaveResult {
-  if (typeof payload !== 'object' || payload === null) {
-    return { ok: false, error: 'bad payload' }
+// Write a validated image Buffer to UPLOAD_DIR. The filename
+// (<uuid>.<ext>) doubles as the token returned to the client — the
+// client sends that back in /api/send to reference the stored file.
+// Server generates the name; nothing client-supplied touches the
+// filesystem, so there's no path-traversal surface.
+function saveUploadedBytes(bytes: Buffer, mime: string): SaveResult {
+  if (!ALLOWED_MIME.has(mime)) {
+    return { ok: false, status: 400, error: 'unsupported type' }
   }
-  const { mime, base64 } = payload as Record<string, unknown>
-  if (typeof mime !== 'string' || !ALLOWED_MIME.has(mime)) {
-    return { ok: false, error: 'unsupported type' }
-  }
-  if (typeof base64 !== 'string') {
-    return { ok: false, error: 'bad payload' }
-  }
-  const bytes = Buffer.from(base64, 'base64')
   if (bytes.length === 0) {
-    return { ok: false, error: 'empty image' }
+    return { ok: false, status: 400, error: 'empty image' }
   }
   if (bytes.length > MAX_IMAGE_BYTES) {
-    return { ok: false, error: 'image too large' }
+    return { ok: false, status: 413, error: 'image too large' }
   }
   const ext = ALLOWED_MIME.get(mime)!
   const id = crypto.randomUUID()
@@ -170,7 +162,7 @@ function saveUploadedImage(payload: unknown): SaveResult {
     fs.writeFileSync(dest, bytes)
   } catch (err) {
     console.error('Failed to write upload:', err)
-    return { ok: false, error: 'write failed' }
+    return { ok: false, status: 500, error: 'write failed' }
   }
   return { ok: true, path: dest, token }
 }
@@ -246,11 +238,6 @@ try {
   console.error('Failed to prepare uploads dir:', err)
 }
 
-// Route-scoped larger JSON limit for /api/upload (one base64-encoded
-// image per request, up to ~14 MB on the wire). /api/send stays small —
-// it only carries text + token references. Must come BEFORE the global
-// middleware so it matches first for /api/upload.
-app.use('/api/upload', express.json({ limit: '16mb' }))
 app.use(express.json({ limit: '128kb' }))
 
 // Health check endpoint
@@ -331,18 +318,32 @@ app.post('/api/clear-history', (req, res) => {
   res.json({ success })
 })
 
-// Upload one image. Writes <uuid>.<ext> under logs/uploads/ and returns
-// the filename as a token. Client holds the token until it sends the
-// message; at that point /api/send references the token. Orphan files
-// (uploaded but never referenced) get unlinked after UPLOAD_ORPHAN_TTL_MS.
-app.post('/api/upload', (req, res) => {
-  const result = saveUploadedImage(req.body)
-  if (!result.ok) {
-    return res.status(400).json({ success: false, error: result.error })
+// Upload one image as a raw binary body. Content-Type header carries
+// the mime (e.g. image/jpeg). Route-scoped express.raw parses into a
+// Buffer without any JSON/base64 overhead — ~25% less bytes on the
+// wire and no parse step compared to base64-wrapped JSON.
+//
+// Writes <uuid>.<ext> under logs/uploads/ and returns the filename as
+// a token. Client holds the token until it sends the message; at that
+// point /api/send references the token. Orphan files (uploaded but
+// never referenced) get unlinked after UPLOAD_ORPHAN_TTL_MS.
+app.post(
+  '/api/upload',
+  express.raw({ type: () => true, limit: `${Math.ceil(MAX_IMAGE_BYTES / (1024 * 1024))}mb` }),
+  (req, res) => {
+    const mime = (req.header('content-type') || '').split(';')[0].trim()
+    const bytes = req.body
+    if (!Buffer.isBuffer(bytes)) {
+      return res.status(400).json({ success: false, error: 'bad payload' })
+    }
+    const result = saveUploadedBytes(bytes, mime)
+    if (!result.ok) {
+      return res.status(result.status).json({ success: false, error: result.error })
+    }
+    scheduleUnlink(result.path, UPLOAD_ORPHAN_TTL_MS)
+    res.json({ success: true, token: result.token })
   }
-  scheduleUnlink(result.path, UPLOAD_ORPHAN_TTL_MS)
-  res.json({ success: true, token: result.token })
-})
+)
 
 // Send a message, optionally with a list of upload tokens for images the
 // client already uploaded via /api/upload. Tokens resolve to paths and
