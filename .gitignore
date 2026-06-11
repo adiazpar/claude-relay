@@ -32,3 +32,4 @@ Thumbs.db
 docs/
 logs/
 *.log
+agents.local.json

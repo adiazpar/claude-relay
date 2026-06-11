@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
 import * as tls from 'tls'
 import { TMUX_SESSION } from './config.js'
+import { getAgents, AgentDefinition } from './agents.js'
 
 const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
@@ -30,13 +31,17 @@ export interface ServerPort {
 }
 
 export interface PaneRuntimeState {
-  claudeRunning: boolean
+  // id of the registered agent detected in this pane, or null when no
+  // agent TUI is running (shell prompt, dev server, arbitrary process).
+  agentId: string | null
   shellReady: boolean
   currentCommand: string
   serverRunning: boolean
   serverCommand: string | null
   serverPorts: ServerPort[]
 }
+
+type ProcessEntry = { pid: number; ppid: number; command: string }
 
 export class TmuxBridge extends EventEmitter {
   private lastOutputByPane = new Map<string, string>()
@@ -97,7 +102,7 @@ export class TmuxBridge extends EventEmitter {
     })
   }
 
-  private listProcesses(): Array<{ pid: number; ppid: number; command: string }> {
+  private listProcesses(): ProcessEntry[] {
     try {
       const output = execFileSync('ps', ['-ax', '-o', 'pid=,ppid=,command='], {
         encoding: 'utf-8',
@@ -115,22 +120,36 @@ export class TmuxBridge extends EventEmitter {
           ppid: parseInt(match[2], 10),
           command: match[3]
         }
-      }).filter((row): row is { pid: number; ppid: number; command: string } => row !== null)
+      }).filter((row): row is ProcessEntry => row !== null)
     } catch (error) {
       console.error('Failed to list processes:', error)
       return []
     }
   }
 
-  private isClaudeCommand(command: string | undefined | null): boolean {
-    if (!command) return false
-    const normalized = command.trim().toLowerCase()
-    return /(^|[\/\s])claude($|\s)/.test(normalized)
+  // Word-boundary regex for an agent's binary name, compiled once per
+  // agent. Matches "claude", "/usr/local/bin/claude", "claude --flag" but
+  // not "claude-notes.md".
+  private agentRegexCache = new Map<string, RegExp>()
+  private agentRegex(agent: AgentDefinition): RegExp {
+    let re = this.agentRegexCache.get(agent.id)
+    if (!re) {
+      const escaped = agent.binary.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      re = new RegExp(`(^|[\\/\\s])${escaped}($|\\s)`)
+      this.agentRegexCache.set(agent.id, re)
+    }
+    return re
   }
 
-  // Claude Code sets process.title to its version string (e.g. "2.1.114"),
-  // which is what tmux reports as pane_current_command.
-  private looksLikeClaudeVersion(command: string | undefined | null): boolean {
+  private matchesAgent(agent: AgentDefinition, command: string | undefined | null): boolean {
+    if (!command) return false
+    return this.agentRegex(agent).test(command.trim().toLowerCase())
+  }
+
+  // Some agents (Claude Code) set process.title to their version string
+  // (e.g. "2.1.114"), which is what tmux reports as pane_current_command
+  // and what ps shows once the TUI boots.
+  private looksLikeVersionTitle(command: string | undefined | null): boolean {
     if (!command) return false
     return /^\d+\.\d+\.\d+/.test(command.trim())
   }
@@ -277,14 +296,14 @@ export class TmuxBridge extends EventEmitter {
   // string for direct invocations (`python3 manage.py runserver`). All
   // listening ports within the matched subtree are collected so the UI
   // can show quick-launch chips (Vite's HTTP port plus its HMR port, etc.).
-  private detectServer(panePid: number, listeningByPid: Map<number, number[]>): { command: string; ports: ServerPort[] } | null {
+  private detectServer(panePid: number, listeningByPid: Map<number, number[]>, processes?: ProcessEntry[]): { command: string; ports: ServerPort[] } | null {
     if (!Number.isInteger(panePid) || panePid <= 0) return null
     if (listeningByPid.size === 0) return null
 
-    const processes = this.listProcesses()
+    processes = processes ?? this.listProcesses()
     if (processes.length === 0) return null
 
-    const byParent = new Map<number, Array<{ pid: number; ppid: number; command: string }>>()
+    const byParent = new Map<number, ProcessEntry[]>()
     for (const proc of processes) {
       if (!byParent.has(proc.ppid)) byParent.set(proc.ppid, [])
       byParent.get(proc.ppid)!.push(proc)
@@ -315,11 +334,37 @@ export class TmuxBridge extends EventEmitter {
     return null
   }
 
-  private hasClaudeProcessInTree(rootPid: number): boolean {
-    if (!Number.isInteger(rootPid) || rootPid <= 0) return false
+  // Which registered agent (if any) is running in this pane. Three signals,
+  // any of which is sufficient, checked in order:
+  //   1. pane_current_command word-matches an agent's binary name (rare —
+  //      only when the launch preserves the binary name as process title).
+  //   2. pane_current_command looks like a bare semver and an agent has the
+  //      versionTitle quirk (Claude Code's process.title override — the
+  //      most common hit for an active session).
+  //   3. A walk of the pane's process tree finds a process whose command
+  //      matches an agent's binary (fallback for wrappers and the brief
+  //      window before the TUI sets its title).
+  // Never detect by sending shell commands into the pane — when an agent
+  // TUI is attached, send-keys lands in its chat input, not a shell.
+  private detectAgentForPane(pane: PaneInfo, processes?: ProcessEntry[]): string | null {
+    const agents = getAgents()
 
-    const processes = this.listProcesses()
-    if (processes.length === 0) return false
+    for (const agent of agents) {
+      if (this.matchesAgent(agent, pane.currentCommand)) return agent.id
+    }
+    if (this.looksLikeVersionTitle(pane.currentCommand)) {
+      const versionAgent = agents.find(a => a.versionTitle)
+      if (versionAgent) return versionAgent.id
+    }
+
+    return this.detectAgentInTree(pane.panePid, agents, processes)
+  }
+
+  private detectAgentInTree(rootPid: number, agents: AgentDefinition[], processes?: ProcessEntry[]): string | null {
+    if (!Number.isInteger(rootPid) || rootPid <= 0) return null
+
+    processes = processes ?? this.listProcesses()
+    if (processes.length === 0) return null
 
     const childrenByParent = new Map<number, number[]>()
     for (const proc of processes) {
@@ -339,8 +384,10 @@ export class TmuxBridge extends EventEmitter {
       seen.add(pid)
 
       const proc = processByPid.get(pid)
-      if (proc && this.isClaudeCommand(proc.command)) {
-        return true
+      if (proc) {
+        for (const agent of agents) {
+          if (this.matchesAgent(agent, proc.command)) return agent.id
+        }
       }
 
       const children = childrenByParent.get(pid) || []
@@ -349,7 +396,7 @@ export class TmuxBridge extends EventEmitter {
       }
     }
 
-    return false
+    return null
   }
 
   sessionExists(): boolean {
@@ -491,10 +538,10 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Send a message to Claude Code in tmux. When imagePaths has entries,
-  // their absolute paths are prepended space-separated to the payload so
-  // Claude Code's TUI detects them as image attachments (same buffer
-  // content as one or more drag-and-drops).
+  // Send a message into a tmux pane (an agent TUI or a plain shell). When
+  // imagePaths has entries, their absolute paths are prepended
+  // space-separated to the payload so Claude Code's TUI detects them as
+  // image attachments (same buffer content as one or more drag-and-drops).
   sendMessage(message: string, target?: string, imagePaths?: string[]): boolean {
     if (!this.sessionExists()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
@@ -654,21 +701,18 @@ export class TmuxBridge extends EventEmitter {
     return this.capturePane(CAPTURE_LINES, target)
   }
 
-  private computePaneRuntimeState(pane: PaneInfo, listeningByPid?: Map<number, number[]>): PaneRuntimeState {
-    const claudeRunning =
-      this.isClaudeCommand(pane.currentCommand) ||
-      this.looksLikeClaudeVersion(pane.currentCommand) ||
-      this.hasClaudeProcessInTree(pane.panePid)
-    const shellReady = !claudeRunning && this.isShellCommand(pane.currentCommand)
+  private computePaneRuntimeState(pane: PaneInfo, listeningByPid?: Map<number, number[]>, processes?: ProcessEntry[]): PaneRuntimeState {
+    const agentId = this.detectAgentForPane(pane, processes)
+    const shellReady = !agentId && this.isShellCommand(pane.currentCommand)
 
-    // Claude and a listening dev server don't realistically share a pane
-    // (both want the foreground), so skip the lsof pass when Claude is up.
+    // An agent TUI and a listening dev server don't realistically share a
+    // pane (both want the foreground), so skip the lsof pass when one is up.
     let serverRunning = false
     let serverCommand: string | null = null
     let serverPorts: ServerPort[] = []
-    if (!claudeRunning) {
+    if (!agentId) {
       const map = listeningByPid ?? this.listListeningByPid()
-      const detected = this.detectServer(pane.panePid, map)
+      const detected = this.detectServer(pane.panePid, map, processes)
       if (detected) {
         serverRunning = true
         serverCommand = detected.command
@@ -677,7 +721,7 @@ export class TmuxBridge extends EventEmitter {
     }
 
     return {
-      claudeRunning,
+      agentId,
       shellReady,
       currentCommand: pane.currentCommand,
       serverRunning,
@@ -688,7 +732,7 @@ export class TmuxBridge extends EventEmitter {
 
   private emptyRuntimeState(): PaneRuntimeState {
     return {
-      claudeRunning: false,
+      agentId: null,
       shellReady: false,
       currentCommand: '',
       serverRunning: false,
@@ -715,10 +759,11 @@ export class TmuxBridge extends EventEmitter {
       for (const p of ports) activePorts.add(p)
     }
     this.gcProtocolCache(activePorts)
+    const processes = this.listProcesses()
     return this.listPanes().map(pane => ({
       paneId: pane.id,
       target: pane.target,
-      ...this.computePaneRuntimeState(pane, listeningByPid)
+      ...this.computePaneRuntimeState(pane, listeningByPid, processes)
     }))
   }
 
@@ -770,12 +815,9 @@ export class TmuxBridge extends EventEmitter {
     return true
   }
 
-  // Check if Claude Code is running in the pane's process tree.
-  isClaudeRunning(target?: string): boolean {
-    return this.getPaneRuntimeState(target).claudeRunning
-  }
-
-  // Detect current Claude Code permission mode from output
+  // Detect current Claude Code permission mode from output. Claude-specific:
+  // other agents have no shift+tab indicator line, so this returns 'normal'
+  // for them, which the client ignores.
   detectMode(target?: string): 'plan' | 'normal' | 'auto-edit' | 'bypass' {
     const output = this.capturePane(30, target).replace(ANSI_RE, '')
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url'
 import fs from 'fs'
 import crypto from 'crypto'
 import { tmuxBridge } from './tmux-bridge.js'
-import { getAllCommands } from './commands.js'
+import { getAgents, getAgentsForClient } from './agents.js'
 import { PORT } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -245,9 +245,20 @@ app.use(express.json({ limit: '128kb' }))
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    tmuxSession: tmuxBridge.sessionExists(),
-    claudeRunning: tmuxBridge.isClaudeRunning()
+    tmuxSession: tmuxBridge.sessionExists()
   })
+})
+
+// Registered agents the client can offer in the launcher. Availability is
+// probed through the user's login shell (cached) — see agents.ts.
+app.get('/api/agents', async (req, res) => {
+  try {
+    const agents = await getAgentsForClient()
+    res.json({ agents })
+  } catch (error) {
+    console.error('Error listing agents:', error)
+    res.status(500).json({ error: 'Failed to list agents' })
+  }
 })
 
 // Get current pane content
@@ -295,20 +306,7 @@ app.post('/api/panes/close', (req, res) => {
   }
 })
 
-// Get available slash commands
-app.get('/api/commands', async (req, res) => {
-  try {
-    const rawCwd = req.query.cwd as string | undefined
-    const cwd = rawCwd ? validateCwd(rawCwd) ?? undefined : undefined
-    const commands = await getAllCommands(cwd)
-    res.json({ commands })
-  } catch (error) {
-    console.error('Error fetching commands:', error)
-    res.status(500).json({ error: 'Failed to fetch commands' })
-  }
-})
-
-// Drop tmux scrollback for a pane (used after launching Claude so the pre-TUI
+// Drop tmux scrollback for a pane (used after launching an agent so the pre-TUI
 // command echoes don't sit above Claude's UI in the canvas).
 app.post('/api/clear-history', (req, res) => {
   const target = validatePaneTarget(req.body?.target)
@@ -444,13 +442,6 @@ wss.on('connection', (ws: WebSocket) => {
   ws.send(JSON.stringify({
     type: 'paneList',
     panes
-  }))
-
-  // Send initial status
-  ws.send(JSON.stringify({
-    type: 'status',
-    tmuxSession: tmuxBridge.sessionExists(),
-    claudeRunning: tmuxBridge.isClaudeRunning(initialPane?.target)
   }))
 
   // Send current output for first pane
@@ -715,7 +706,7 @@ httpServer.listen(PORT, HOST, () => {
   ------------------------------------------------------------
   Listening on http://${HOST}:${PORT}
   Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}
-  Claude Code:  ${tmuxBridge.isClaudeRunning() ? 'Running' : 'Not detected'}
+  Agents:       ${getAgents().map(a => a.id).join(', ')}
 `)
 })
 

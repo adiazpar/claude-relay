@@ -13,6 +13,11 @@ keep coding from their phone without giving up their local environment.
 - **Multi-pane tabs**: every tmux window is a tab. N parallel Claude
   Code sessions, each in its own working directory, switchable with a
   tap.
+- **Multiple agents**: Claude Code is the default, but any agentic
+  coding CLI works. Codex and Gemini CLI are built in (offered when
+  installed), and `agents.local.json` adds anything else — aider,
+  opencode, or a wrapper around a local model. See
+  [Using other agents](#using-other-agents).
 - **Live server detection**: when a process in a pane binds a TCP port,
   the chat input swaps for tappable port chips. One tap opens the dev
   server's URL in a new browser tab.
@@ -232,6 +237,67 @@ The relay keeps running via launchd (macOS) or systemd (Linux), so
 your tmux session and everything in it survives phone disconnects,
 relay crashes, and reboots. Close the phone browser, come back
 hours later — everything is where you left it.
+
+## Using other agents
+
+The Start button launches whichever AI coding CLIs the relay knows
+about. Built in:
+
+| Agent | Launch command |
+|---|---|
+| Claude Code | `claude --dangerously-skip-permissions` |
+| Codex | `codex --dangerously-bypass-approvals-and-sandbox` |
+| Gemini CLI | `gemini --yolo` |
+
+At startup the relay probes your login shell for each binary; agents
+that aren't installed don't appear in the picker. With one agent
+installed the button launches it directly; with more, tapping opens
+a picker.
+
+To add your own agent — or override a built-in's launch flags —
+create `agents.local.json` in the repo root (gitignored):
+
+```json
+{
+  "agents": [
+    {
+      "id": "aider",
+      "name": "Aider",
+      "command": "aider --no-auto-commits"
+    },
+    {
+      "id": "local-qwen",
+      "name": "Qwen (local)",
+      "command": "aider --model ollama/qwen2.5-coder"
+    },
+    {
+      "id": "claude",
+      "command": "claude"
+    }
+  ]
+}
+```
+
+Fields: `id` (required, lowercase), `command` (required — typed into
+the pane verbatim), `name` (display name, defaults to id), `binary`
+(process name used for detection, defaults to the command's first
+word), `modeCycleKey` (key that cycles the agent's permission mode,
+e.g. `"S-Tab"`; enables the Change-mode button), `imageAttach`
+(`true` if typing absolute image paths attaches them, as Claude Code
+does; enables the paperclip). Entries reusing a built-in `id` merge
+over the built-in, so the last example just strips Claude's
+skip-permissions flag.
+
+The agent picker shows a brand logo when the `id` matches one of the
+bundled marks (`claude`, `codex`, `openai`, `gemini`, `ollama` —
+vendored from [Simple Icons](https://simpleicons.org)); other agents
+get a generic icon.
+
+Local models work the same way: anything that ships an interactive
+CLI — aider or opencode pointed at an Ollama model, a llama.cpp
+wrapper script — is launchable as long as it's a command you could
+type into a terminal. Restart the relay (`./relay restart`) after
+editing the file.
 
 ## How it works
 
