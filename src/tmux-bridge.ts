@@ -1,8 +1,8 @@
 import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
 import * as tls from 'tls'
+import { TMUX_SESSION } from './config.js'
 
-const TMUX_SESSION = process.env.TMUX_SESSION || 'dev'
 const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
 const CAPTURE_LINES = 500 // lines

@@ -8,7 +8,7 @@ keep coding from their phone without giving up their local environment.
 
 ## What it does
 
-- **Mobile web UI** served over HTTP on a port of your choice (3001 by
+- **Mobile web UI** served over HTTP on a port of your choice (7337 by
   default). Open it on your phone's browser.
 - **Multi-pane tabs**: every tmux window is a tab. N parallel Claude
   Code sessions, each in its own working directory, switchable with a
@@ -168,12 +168,12 @@ health-checks the daemon, and prints the URL for your phone.
 All environment variables are optional:
 
 ```bash
-PORT=4000 TMUX_SESSION=work DEBUG=1 ./relay install
+RELAY_PORT=4000 TMUX_SESSION=work DEBUG=1 ./relay install
 ```
 
 | Variable       | Default | Description                                                                     |
 | -------------- | ------- | ------------------------------------------------------------------------------- |
-| `PORT`         | `3001`  | Port the daemon binds to.                                                       |
+| `RELAY_PORT`   | `7337`  | Port the daemon binds to. The generic `PORT` variable is deliberately ignored — most Node dev servers (Next.js, Vite) honor it, which causes port collisions. |
 | `TMUX_SESSION` | `dev`   | Tmux session name the relay attaches to.                                        |
 | `DEBUG`        | `0`     | If `1`, write a rotating app log to `./logs/debug.log` (1 MB rotation, one backup). |
 | `VERBOSE`      | `0`     | If `1`, show full output from noisy sub-commands like `npm install`.           |
@@ -250,7 +250,7 @@ hours later — everything is where you left it.
 
 **Can't reach the URL on your phone** — ensure Tailscale is on (or
 you're on the same Wi-Fi as the host) and the host's firewall allows
-inbound connections on port 3001.
+inbound connections on port 7337 (or your custom `RELAY_PORT`).
 
 **"Same network" URL doesn't work even on the same Wi-Fi** — if
 you're running the relay inside a VM (OrbStack, UTM, VMware) that

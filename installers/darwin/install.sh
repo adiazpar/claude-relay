@@ -12,7 +12,9 @@ LABEL="com.claude-relay"
 mkdir -p "$HOME/Library/LaunchAgents"
 mkdir -p "$REPO/logs"
 
-PORT="${PORT:-3001}"
+# RELAY_PORT, not PORT: the generic PORT namespace is consumed by most
+# Node dev servers, so the relay never reads it.
+PORT="${RELAY_PORT:-7337}"
 SESSION="${TMUX_SESSION:-dev}"
 DEBUG="${DEBUG:-0}"
 

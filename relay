@@ -8,7 +8,7 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 OS="$(uname -s)"
 LABEL="com.claude-relay"
 
-PORT="${PORT:-3001}"
+DEFAULT_PORT=7337
 TMUX_SESSION="${TMUX_SESSION:-dev}"
 
 say()  { echo "$@"; }
@@ -21,6 +21,32 @@ case "$OS" in
 esac
 
 service_plist() { echo "$HOME/Library/LaunchAgents/$LABEL.plist"; }
+
+# The port the installed daemon actually uses, read from the --port
+# argument baked into the generated unit file. The unit is the single
+# source of truth — no env vars, no guessing. The generic PORT env var
+# is deliberately never consumed: nearly every Node dev server honors
+# it, which is how stray PORT values caused cross-project collisions.
+installed_port() {
+  case "$OS" in
+    Darwin)
+      [ -f "$(service_plist)" ] || return 0
+      awk -F'[<>]' 'hit { print $3; exit } /<string>--port<\/string>/ { hit=1 }' \
+        "$(service_plist)"
+      ;;
+    Linux)
+      local unit="$HOME/.config/systemd/user/claude-relay.service"
+      [ -f "$unit" ] || return 0
+      sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' "$unit"
+      ;;
+  esac
+}
+
+# Snapshot any PORT inherited from the shell before our internal PORT
+# variable masks it — cmd_dev warns about strays (see installed_port).
+PORT_ENV_SNAPSHOT="${PORT:-}"
+PORT="${RELAY_PORT:-$(installed_port)}"
+PORT="${PORT:-$DEFAULT_PORT}"
 
 service_loaded() {
   case "$OS" in
@@ -96,6 +122,14 @@ cmd_status() {
 }
 
 cmd_dev() {
+  if [ -n "${PORT_ENV_SNAPSHOT:-}" ]; then
+    warn "PORT=$PORT_ENV_SNAPSHOT is present in your shell environment. claude-relay
+ignores it (use RELAY_PORT to pick a port), but dev servers in your
+projects (Next.js, Vite, etc.) will honor it and can collide with
+claude-relay or each other. 'unset PORT' or start a fresh terminal
+session if that's not intentional."
+    say ""
+  fi
   if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     say "Port $PORT is already in use."
     say ""
@@ -114,7 +148,7 @@ cmd_dev() {
   say "Starting foreground server on port $PORT (Ctrl-C to stop)..."
   say ""
   cd "$REPO"
-  exec npm run start
+  exec npm run start -- --port "$PORT" --session "$TMUX_SESSION"
 }
 
 usage() {
@@ -136,7 +170,9 @@ Commands:
   help          Print this message.
 
 Environment:
-  PORT=4000         Default 3001. Port the daemon binds to.
+  RELAY_PORT=4000   Default 7337. Port the daemon binds to. (The generic
+                    PORT variable is deliberately ignored — most Node dev
+                    servers honor it, which causes port collisions.)
   TMUX_SESSION=w    Default "dev". Tmux session name.
   DEBUG=1           Enable rotating app log at ./logs/debug.log.
   VERBOSE=1         Show full npm install output during install.

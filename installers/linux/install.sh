@@ -15,7 +15,9 @@ UNIT_DIR="$HOME/.config/systemd/user"
 UNIT="$UNIT_DIR/claude-relay.service"
 STATE_DIR="$HOME/.config/claude-relay"
 
-PORT="${PORT:-3001}"
+# RELAY_PORT, not PORT: the generic PORT namespace is consumed by most
+# Node dev servers, so the relay never reads it.
+PORT="${RELAY_PORT:-7337}"
 SESSION="${TMUX_SESSION:-dev}"
 DEBUG="${DEBUG:-0}"
 

@@ -5,10 +5,18 @@
   <key>Label</key>
   <string>com.claude-relay</string>
 
+  <!-- Port and session travel as argv, not env vars. PORT is a generic
+       env namespace honored by nearly every Node dev server, so keeping
+       it out of the environment makes an entire class of port
+       collisions impossible. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>{{REPO}}/scripts/serve.sh</string>
+    <string>--port</string>
+    <string>{{PORT}}</string>
+    <string>--session</string>
+    <string>{{SESSION}}</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -39,10 +47,6 @@
     <string>en_US.UTF-8</string>
     <key>TERM</key>
     <string>xterm-256color</string>
-    <key>PORT</key>
-    <string>{{PORT}}</string>
-    <key>TMUX_SESSION</key>
-    <string>{{SESSION}}</string>
     <key>DEBUG</key>
     <string>{{DEBUG}}</string>
   </dict>

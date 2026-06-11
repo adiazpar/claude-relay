@@ -7,6 +7,7 @@ import fs from 'fs'
 import crypto from 'crypto'
 import { tmuxBridge } from './tmux-bridge.js'
 import { getAllCommands } from './commands.js'
+import { PORT } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -707,13 +708,6 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   console.error('Unhandled request error:', err)
   res.status(500).json({ success: false, error: 'internal error' })
 })
-
-const PORT_RAW = process.env.PORT ?? '3001'
-const PORT = Number(PORT_RAW)
-if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
-  console.error(`Invalid PORT: ${JSON.stringify(PORT_RAW)}. Expected an integer 1-65535.`)
-  process.exit(1)
-}
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`

@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-PORT="${1:-3001}"
+PORT="${1:-7337}"
 OS="$(uname -s)"
 
 # Two buckets:

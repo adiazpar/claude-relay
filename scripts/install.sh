@@ -7,7 +7,12 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-PORT="${PORT:-3001}"
+# RELAY_PORT, not PORT: the generic PORT namespace is consumed by most
+# Node dev servers (Next.js, Vite, ...), so the relay never reads it.
+# Snapshot any PORT inherited from the shell first — the doctor check
+# below warns about it, and our internal PORT variable would mask it.
+STRAY_PORT="${PORT:-}"
+PORT="${RELAY_PORT:-7337}"
 TMUX_SESSION="${TMUX_SESSION:-dev}"
 DEBUG="${DEBUG:-0}"
 VERBOSE="${VERBOSE:-0}"
@@ -93,6 +98,18 @@ if ! command -v jq >/dev/null 2>&1; then
   say ""
 fi
 
+# -------- Doctor: stray generic PORT in the shell --------
+# The relay itself ignores PORT, but other dev servers (Next.js, Vite,
+# Express apps) honor it and will all bind to the same port.
+if [ -n "$STRAY_PORT" ]; then
+  warn "PORT=$STRAY_PORT is present in your shell environment. claude-relay
+ignores it (use RELAY_PORT to pick a port), but dev servers in your
+projects (Next.js, Vite, etc.) will honor it and can collide with
+claude-relay or each other. 'unset PORT' or start a fresh terminal
+session if that's not intentional."
+  say ""
+fi
+
 # -------- Pre-flight: port in use? --------
 existing_service() {
   case "$OS" in
@@ -108,7 +125,7 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     die "Port $PORT is in use by another process.
 
 Either stop the other service, or rerun with a different port:
-  PORT=4000 ./relay install"
+  RELAY_PORT=4000 ./relay install"
   fi
 fi
 
@@ -124,11 +141,11 @@ fi
 # -------- Delegate to platform installer --------
 case "$OS" in
   Darwin)
-    PORT="$PORT" TMUX_SESSION="$TMUX_SESSION" DEBUG="$DEBUG" \
+    RELAY_PORT="$PORT" TMUX_SESSION="$TMUX_SESSION" DEBUG="$DEBUG" \
       "$REPO/installers/darwin/install.sh"
     ;;
   Linux)
-    PORT="$PORT" TMUX_SESSION="$TMUX_SESSION" DEBUG="$DEBUG" \
+    RELAY_PORT="$PORT" TMUX_SESSION="$TMUX_SESSION" DEBUG="$DEBUG" \
       "$REPO/installers/linux/install.sh"
     ;;
 esac
