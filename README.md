@@ -38,8 +38,8 @@ keep coding from their phone without giving up their local environment.
 
 - **macOS** (Sonoma and later)
 - **Linux with systemd** (Ubuntu 22.04+, Debian 12+, Fedora, Arch, Alpine)
-
-Windows is not supported.
+- **Windows 10 (1809+) / 11** — native, no tmux or WSL required; see
+  [Windows](#windows)
 
 ## Dependencies
 
@@ -328,10 +328,11 @@ installed there. Tab names, drafts, and the active tab are
 remembered per device. The device list lives in your phone browser's
 storage, so each browser/PWA install manages its own list.
 
-Every machine in the list must run the relay itself, which means
-macOS or Linux with tmux — a phone, tablet, or Windows box can't be
-a target device (they can all be *clients*, though; any browser that
-can reach a relay can drive it).
+Every machine in the list must run the relay itself — macOS or Linux
+with tmux, or Windows with the pane-host (see [Windows](#windows)).
+Phones and tablets can't be targets, but any browser that can reach a
+relay can drive it, and mixing platforms is fine: your Mac's UI can
+drive your Windows box over Tailscale and vice versa.
 
 Cross-device calls are protected by an origin allowlist: a relay
 only accepts browser requests from origins that can't exist on the
@@ -339,6 +340,81 @@ public internet (`*.ts.net`, `*.local`, single-label hostnames,
 localhost, and private/CGNAT IPs). No configuration needed — but if
 you serve the UI from a public domain someday, the switcher will
 refuse to work by design.
+
+## Windows
+
+Windows support is native — no tmux, no WSL requirement, no MSYS2
+hacks. Instead of tmux, a small **pane-host** daemon owns one ConPTY
+pseudo-terminal per tab and survives relay restarts, so your panes
+(and the dev servers and Claude sessions inside them) persist exactly
+like a tmux session does on macOS/Linux.
+
+Requirements: Windows 10 1809+ or Windows 11, and Node.js 20+
+(installer from [nodejs.org](https://nodejs.org), or winget:
+`winget install OpenJS.NodeJS.LTS`).
+
+```powershell
+git clone https://github.com/anthropics/claude-relay.git
+cd claude-relay
+.\relay.cmd install
+```
+
+`relay.cmd` mirrors the POSIX CLI: `install`, `uninstall`, `start`,
+`stop`, `restart`, `status`, `dev`. The installer registers a
+current-user Scheduled Task that starts the relay (hidden) at logon
+and restarts it on crash. No admin rights needed — except for the
+inbound firewall rule for LAN access; if you skip elevation the
+installer prints the one-liner to run later. Tailscale-only access
+needs no firewall rule at all.
+
+Pick a different port with `$env:RELAY_PORT=4000; .\relay.cmd install`.
+
+### Shells
+
+Each tab runs the shell you choose when you create it — the **+**
+button opens a picker listing what's installed:
+
+- **PowerShell** (7 if present, else Windows PowerShell) — default
+- **Command Prompt**
+- **Git Bash** — auto-detected from the registry and common install
+  locations; this is your "Linux commands on Windows" tab
+- **WSL** — one entry per installed distro; a full Linux shell in a tab
+
+Set a different default in `relay.local.json` at the repo root:
+`{ "defaultShell": "git-bash" }`.
+
+Claude (and other agent CLIs) work in any of these tabs — install the
+CLI in the environment the tab runs (`npm install -g
+@anthropic-ai/claude-code` on Windows for PowerShell/cmd/Git Bash
+tabs, inside the distro for WSL tabs). Agent detection, the
+mode-cycle button, server detection with Stop/Restart, and port chips
+all work in every shell, including inside WSL.
+
+### WSL networking caveat
+
+A dev server running *inside a WSL2 distro* binds inside the WSL VM,
+which is NAT'd by default — reachable from the Windows box itself but
+**not from your phone**. Port chips in WSL tabs will only work in a
+browser on the PC unless you either enable [mirrored networking
+mode](https://learn.microsoft.com/en-us/windows/wsl/networking#mirrored-mode-networking)
+(Windows 11 22H2+) or run Tailscale inside the distro. Servers in
+PowerShell/cmd/Git Bash tabs don't have this problem. WSL1 distros
+don't either (they share the host network stack).
+
+### Notes
+
+- **Persistence**: `relay.cmd stop`/`restart` never touch the
+  pane-host — tabs and their processes survive, same as tmux surviving
+  a relay restart. Panes are lost on reboot/logoff (also true of tmux).
+  `relay.cmd uninstall` closes them (pass `-KeepPanes` to preserve).
+- **Logs** live in `logs\` inside the repo (`service.log` for the
+  relay, `pane-host.log` for the pane-host). Deleting the cloned
+  folder after `uninstall` removes every trace.
+- **OneDrive**: don't clone the repo into a OneDrive-synced folder —
+  file syncing races the image-upload cleanup. The installer warns.
+- **No `.local` URLs** on Windows: unlike macOS, Windows doesn't
+  advertise its hostname over mDNS. Use the Tailscale name
+  (recommended) or the LAN IP that `relay.cmd status` prints.
 
 ## How it works
 

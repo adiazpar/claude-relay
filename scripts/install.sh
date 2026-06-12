@@ -64,7 +64,8 @@ say ""
 # -------- OS support --------
 case "$OS" in
   Darwin|Linux) ;;
-  *) die "claude-relay v1 supports macOS and Linux only (detected: $OS). Windows support is planned." ;;
+  MINGW*|MSYS*|CYGWIN*) die "on Windows, install with the native CLI: relay.cmd install (from cmd or PowerShell)." ;;
+  *) die "this installer supports macOS and Linux (detected: $OS). On Windows use relay.cmd install." ;;
 esac
 
 # -------- Required tools --------

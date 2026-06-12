@@ -33,3 +33,4 @@ docs/
 logs/
 *.log
 agents.local.json
+relay.local.json

@@ -17,7 +17,9 @@ die()  { echo "error: $@" >&2; exit 1; }
 
 case "$OS" in
   Darwin|Linux) ;;
-  *) die "claude-relay supports macOS and Linux (detected: $OS)." ;;
+  MINGW*|MSYS*|CYGWIN*)
+    die "you're in a POSIX-emulation shell on Windows. Use the native CLI instead: relay.cmd $* (from cmd/PowerShell, or 'cmd //c relay.cmd $*' from here)." ;;
+  *) die "claude-relay supports macOS, Linux, and Windows (via relay.cmd) — detected: $OS." ;;
 esac
 
 service_plist() { echo "$HOME/Library/LaunchAgents/$LABEL.plist"; }

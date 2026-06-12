@@ -954,6 +954,19 @@
     </div>
   </div>
 
+  <!-- Shell picker sheet (shown when the device offers more than one shell — Windows relays) -->
+  <div class="tab-action-sheet-backdrop" id="shellPickerBackdrop"></div>
+  <div class="tab-action-sheet" id="shellPickerSheet">
+    <div class="tab-action-sheet-content">
+      <div class="tab-action-sheet-header">
+        <div class="tab-action-sheet-title">New tab</div>
+        <div class="tab-action-sheet-name" id="shellPickerSubtitle">Choose a shell</div>
+      </div>
+      <div id="shellPickerOptions" class="tab-action-sheet-options">
+      </div>
+    </div>
+  </div>
+
   <!-- Device switcher sheet -->
   <div class="tab-action-sheet-backdrop" id="deviceSheetBackdrop"></div>
   <div class="tab-action-sheet" id="deviceSheet">
@@ -1670,6 +1683,30 @@
       }
     }
 
+    // Shells available for new tabs on the active device. Empty until
+    // /api/shells answers; with zero or one entry the new-tab button
+    // creates directly (macOS/Linux relays return a single default —
+    // tmux always runs the user's shell), with more than one (Windows:
+    // PowerShell/cmd/Git Bash/WSL distros) it opens a picker sheet.
+    // Re-fetched on device switch — each machine has its own shells.
+    let shells = [];
+    let shellsFetched = false;
+
+    async function fetchShells() {
+      try {
+        const res = await fetch(apiUrl('/api/shells'), { cache: 'no-store' });
+        const data = await res.json();
+        if (Array.isArray(data.shells)) {
+          shells = data.shells;
+          shellsFetched = true;
+        }
+      } catch (error) {
+        // Older relays don't serve /api/shells — keep the directly-create
+        // behavior.
+        console.error('Failed to fetch shells:', error);
+      }
+    }
+
     // Resolve an agentId from a runtime-state broadcast. Falls back to a
     // bare entry so a pane running an agent that was since removed from the
     // registry still renders sanely (named input, no mode/attach buttons).
@@ -2151,7 +2188,8 @@
       paneTabs.replaceChildren();
 
       for (const pane of allPanes) {
-        const dirName = pane.cwd.split('/').pop() || pane.cwd;
+        // Split on both separators — Windows relays report C:\-style cwds.
+        const dirName = pane.cwd.split(/[\\/]/).pop() || pane.cwd;
         const customName = storage.get(STORAGE_KEYS.tabName(pane.id));
         const displayName = customName || dirName;
         const isActive = pane.id === activePaneId;
@@ -2465,6 +2503,45 @@
     agentPickerBackdrop.addEventListener('click', closeAgentPicker);
 
     // ============================================
+    // SHELL PICKER SHEET
+    // ============================================
+    const shellPickerSheet = document.getElementById('shellPickerSheet');
+    const shellPickerBackdrop = document.getElementById('shellPickerBackdrop');
+    const shellPickerOptions = document.getElementById('shellPickerOptions');
+
+    function shellIconEl() {
+      // Generic terminal prompt mark (>_) for every shell entry.
+      return svgEl(
+        { viewBox: '0 0 24 24', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+        ['M4 5 L10 12 L4 19', 'M12 19 L20 19']
+      );
+    }
+
+    function openShellPicker() {
+      shellPickerOptions.replaceChildren();
+      for (const shell of shells) {
+        const opt = document.createElement('div');
+        opt.className = 'tab-action-option';
+        opt.appendChild(shellIconEl());
+        opt.appendChild(document.createTextNode(shell.name));
+        opt.addEventListener('click', () => {
+          closeShellPicker();
+          createNewWindow(shell.id);
+        });
+        shellPickerOptions.appendChild(opt);
+      }
+      shellPickerSheet.classList.add('open');
+      shellPickerBackdrop.classList.add('open');
+    }
+
+    function closeShellPicker() {
+      shellPickerSheet.classList.remove('open');
+      shellPickerBackdrop.classList.remove('open');
+    }
+
+    shellPickerBackdrop.addEventListener('click', closeShellPicker);
+
+    // ============================================
     // DEVICE SWITCHER SHEET
     // ============================================
     const deviceSheet = document.getElementById('deviceSheet');
@@ -2703,6 +2780,8 @@
       activePaneTarget = null;
       agents = defaultAgents();
       agentsFetched = false;
+      shells = [];
+      shellsFetched = false;
       clearPendingImages(); // upload tokens only exist on the old relay
       messageInput.value = '';
       messageInput.style.height = 'auto';
@@ -2745,17 +2824,25 @@
       }
     }
 
-    // Create a new window
-    async function createNewWindow() {
+    // Create a new window. With an explicit shellId (from the picker) or a
+    // single-shell device, creates directly; on multi-shell devices the
+    // add button routes through the picker first.
+    async function createNewWindow(shellId) {
+      if (!shellId && shells.length > 1) {
+        openShellPicker();
+        return;
+      }
       try {
         // Send our column count so the new pane is sized correctly before the
         // shell paints its first prompt — otherwise tmux creates the window at
         // its default width and the first prompt's ruler line wraps visibly.
         const cols = calculateColumns();
+        const body = { cols };
+        if (shellId) body.shellId = shellId;
         const res = await fetch(apiUrl('/api/panes'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cols })
+          body: JSON.stringify(body)
         });
         const data = await res.json();
 
@@ -3303,6 +3390,7 @@
       // Load the agent registry once (fire-and-forget — the seeded Claude
       // default keeps the Start button functional in the meantime).
       if (!agentsFetched) fetchAgents();
+      if (!shellsFetched) fetchShells();
       try {
         // Fetch pane list
         const panesRes = await fetch(apiUrl('/api/panes'), { signal: controller.signal, cache: 'no-store' });
