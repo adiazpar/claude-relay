@@ -205,13 +205,56 @@ function scheduleUnlink(filePath: string, delayMs: number): void {
   }, delayMs)
 }
 
+// Multi-device support: the phone UI may be served from one relay's origin
+// while talking to this relay's API (the in-app device switcher). That
+// requires CORS — but a blanket Access-Control-Allow-Origin: * would let any
+// public website the user's browser visits read terminal output and type
+// into tmux. Instead we reflect only origins that cannot exist on the public
+// internet: MagicDNS (*.ts.net), mDNS (*.local), localhost, single-label
+// intranet names, and private/CGNAT IP literals. An attacker can't serve a
+// page from any of those origins to this user's browser, so reflection is
+// safe by construction with zero configuration. Don't loosen this to '*'.
+function isPrivateOrigin(origin: string): boolean {
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  const host = url.hostname.toLowerCase()
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return true
+  if (host.endsWith('.ts.net') || host.endsWith('.local')) return true
+  // IPv6 ULA (Tailscale's fd7a:... range) and link-local literals.
+  if (host.startsWith('[fd') || host.startsWith('[fe80')) return true
+  // Single-label hostnames (MagicDNS short names, plain LAN hostnames).
+  // Public DNS cannot resolve dotless names, so these are intranet-only.
+  if (!host.includes('.') && !host.includes(':')) return true
+  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (m) {
+    const a = Number(m[1])
+    const b = Number(m[2])
+    if (a === 10 || a === 127) return true
+    if (a === 192 && b === 168) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 100 && b >= 64 && b <= 127) return true // Tailscale CGNAT range
+  }
+  return false
+}
+
 const app = express()
 
 const httpServer = createServer(app)
 
 const wss = new WebSocketServer({
   server: httpServer,
-  maxPayload: MAX_WS_MESSAGE_BYTES
+  maxPayload: MAX_WS_MESSAGE_BYTES,
+  // Browsers always send Origin on the WS handshake. Without this check any
+  // public website could open a socket to the relay (WS is exempt from
+  // CORS) — cross-site WebSocket hijacking. Non-browser clients (curl,
+  // scripts) send no Origin and pass.
+  verifyClient: (info: { origin?: string }) =>
+    !info.origin || isPrivateOrigin(info.origin)
 })
 
 const HOST = process.env.HOST || '0.0.0.0' // Listen on all interfaces for Tailscale
@@ -238,6 +281,24 @@ try {
 } catch (err) {
   console.error('Failed to prepare uploads dir:', err)
 }
+
+// CORS for the device switcher (see isPrivateOrigin above). Applies to all
+// /api routes including the raw-body /api/upload, whose image/* content type
+// is non-simple and therefore preflights.
+app.use((req, res, next) => {
+  const origin = req.headers.origin
+  if (origin && isPrivateOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Vary', 'Origin')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Max-Age', '600')
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204)
+  }
+  next()
+})
 
 app.use(express.json({ limit: '128kb' }))
 

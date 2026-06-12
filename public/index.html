@@ -344,6 +344,102 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      min-width: 0;
+    }
+
+    /* Device switcher button (header right side) */
+    .device-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 32px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      flex-shrink: 1;
+      min-width: 0;
+      max-width: 45vw;
+    }
+
+    .device-btn svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+
+    .device-btn span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .device-btn:active {
+      transform: scale(0.97);
+    }
+
+    @media (hover: hover) {
+      .device-btn:hover {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+        background: rgba(215, 118, 85, 0.1);
+      }
+    }
+
+    /* Device rows inside the switcher sheet */
+    .device-option-label {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .device-option-host {
+      font-size: 12px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Probed-unreachable device: dimmed but still tappable, so the user
+       can retry it (machine may be waking up) or remove it. */
+    .tab-action-option.device-offline {
+      opacity: 0.45;
+    }
+
+    .tab-action-option svg.device-option-check {
+      margin-left: auto;
+      color: var(--accent);
+      stroke: currentColor;
+    }
+
+    .device-option-remove {
+      margin-left: auto;
+      padding: 6px;
+      border: none;
+      background: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+    }
+
+    .device-option-remove svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    @media (hover: hover) {
+      .device-option-remove:hover {
+        color: #e53935;
+      }
     }
 
     .logo {
@@ -817,6 +913,11 @@
         </div>
       </div>
     </div>
+    <button class="device-btn" id="deviceBtn" onclick="openDeviceSheet()" aria-label="Switch device">
+      <i data-lucide="monitor"></i>
+      <span id="deviceBtnLabel"></span>
+      <i data-lucide="chevron-down"></i>
+    </button>
   </div>
 
   <div class="pane-tabs hidden" id="paneTabs"></div>
@@ -848,6 +949,20 @@
         <div class="tab-action-sheet-name" id="agentPickerSubtitle">Choose which agent to launch</div>
       </div>
       <div id="agentPickerOptions" class="tab-action-sheet-options">
+        <!-- Options populated by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Device switcher sheet -->
+  <div class="tab-action-sheet-backdrop" id="deviceSheetBackdrop"></div>
+  <div class="tab-action-sheet" id="deviceSheet">
+    <div class="tab-action-sheet-content">
+      <div class="tab-action-sheet-header">
+        <div class="tab-action-sheet-title">Devices</div>
+        <div class="tab-action-sheet-name">Switch to another relay</div>
+      </div>
+      <div id="deviceSheetOptions" class="tab-action-sheet-options">
         <!-- Options populated by JS -->
       </div>
     </div>
@@ -942,6 +1057,79 @@
       set(key, val) { try { localStorage.setItem(key, val); } catch (e) { console.warn('localStorage set failed:', e); } },
       remove(key) { try { localStorage.removeItem(key); } catch {} }
     };
+
+    // ============================================
+    // DEVICE REGISTRY (multi-device switcher)
+    // ============================================
+    // Each device is another machine running its own claude-relay (own tmux
+    // server, own panes, own agent CLIs). The page stays loaded from one
+    // origin; switching devices re-points every API call and the WebSocket
+    // at the chosen relay. Remote relays allow this via tailnet-scoped CORS.
+    const DEVICE_STORAGE_KEY = 'claude-relay-devices';
+    const ACTIVE_DEVICE_STORAGE_KEY = 'claude-relay-active-device';
+
+    // The relay this page was served from. Always first in the list, can't
+    // be removed, and keeps v1's same-origin behavior exactly.
+    const LOCAL_DEVICE = {
+      id: 'local',
+      name: window.location.hostname.split('.')[0] || 'This device',
+      host: window.location.hostname,
+      port: Number(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80),
+      protocol: window.location.protocol === 'https:' ? 'https' : 'http',
+    };
+
+    function loadCustomDevices() {
+      try {
+        const parsed = JSON.parse(storage.get(DEVICE_STORAGE_KEY) || '[]');
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(d =>
+          d && typeof d.id === 'string' && d.id !== 'local'
+          && typeof d.name === 'string' && d.name.length > 0
+          && typeof d.host === 'string' && /^[A-Za-z0-9.\-:\[\]]+$/.test(d.host)
+          && Number.isInteger(d.port) && d.port >= 1 && d.port <= 65535
+        );
+      } catch {
+        return [];
+      }
+    }
+
+    let customDevices = loadCustomDevices();
+    let activeDeviceId = storage.get(ACTIVE_DEVICE_STORAGE_KEY) || 'local';
+
+    function allDevices() {
+      return [LOCAL_DEVICE, ...customDevices];
+    }
+
+    // A stale persisted id (device since removed) falls back to local.
+    if (!allDevices().some(d => d.id === activeDeviceId)) {
+      activeDeviceId = 'local';
+    }
+
+    function saveCustomDevices() {
+      storage.set(DEVICE_STORAGE_KEY, JSON.stringify(customDevices));
+    }
+
+    function getActiveDevice() {
+      return allDevices().find(d => d.id === activeDeviceId) || LOCAL_DEVICE;
+    }
+
+    // Build an API URL against the active device. The local device keeps
+    // same-origin relative URLs (identical to single-device behavior);
+    // remote devices get absolute URLs.
+    function apiUrl(path) {
+      const dev = getActiveDevice();
+      if (dev.id === 'local') return path;
+      return `${dev.protocol === 'https' ? 'https' : 'http'}://${dev.host}:${dev.port}${path}`;
+    }
+
+    function wsUrl() {
+      const dev = getActiveDevice();
+      if (dev.id === 'local') {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${protocol}//${window.location.host}`;
+      }
+      return `${dev.protocol === 'https' ? 'wss' : 'ws'}://${dev.host}:${dev.port}`;
+    }
 
     // ANSI to HTML converter - handles 256 colors and common codes
     const ANSI_COLORS = [
@@ -1211,7 +1399,7 @@
     // blob's type (set by canvas.toBlob or the original File).
     function uploadEntry(entry, blob) {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/upload');
+      xhr.open('POST', apiUrl('/api/upload'));
       xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
 
       xhr.upload.addEventListener('progress', (e) => {
@@ -1453,19 +1641,24 @@
     // ============================================
     // Seeded with Claude as a safe default so the Start button works even
     // if /api/agents hasn't answered yet; replaced by the server's list.
-    let agents = [{
-      id: 'claude',
-      name: 'Claude',
-      command: 'claude --dangerously-skip-permissions',
-      modeCycleKey: 'S-Tab',
-      imageAttach: true,
-      available: null
-    }];
+    // Re-seeded on every device switch — each machine probes its own
+    // installed agent CLIs, so the list is per-device.
+    function defaultAgents() {
+      return [{
+        id: 'claude',
+        name: 'Claude',
+        command: 'claude --dangerously-skip-permissions',
+        modeCycleKey: 'S-Tab',
+        imageAttach: true,
+        available: null
+      }];
+    }
+    let agents = defaultAgents();
     let agentsFetched = false;
 
     async function fetchAgents() {
       try {
-        const res = await fetch('/api/agents', { cache: 'no-store' });
+        const res = await fetch(apiUrl('/api/agents'), { cache: 'no-store' });
         const data = await res.json();
         if (Array.isArray(data.agents) && data.agents.length > 0) {
           agents = data.agents;
@@ -1653,9 +1846,9 @@
     // each port's protocol once (TLS handshake -> https, plaintext response
     // -> http) and ships the result with the port, so chips open with the
     // right scheme regardless of whether the relay itself is HTTP or HTTPS
-    // and regardless of whether the dev server uses TLS. The hostname
-    // inherits from window.location so any access pattern (Tailscale, LAN,
-    // localhost, custom hostname) works without configuration.
+    // and regardless of whether the dev server uses TLS. The hostname is the
+    // active device's — a dev server detected on a remote relay is reachable
+    // at that machine's hostname, not this page's origin.
     function renderServerPorts(ports) {
       serverPortsRow.classList.remove('empty');
       serverPortsRow.replaceChildren();
@@ -1664,7 +1857,7 @@
         serverPortsRow.textContent = 'Waiting for port...';
         return;
       }
-      const host = window.location.hostname;
+      const host = getActiveDevice().host;
       for (const entry of ports) {
         const port = typeof entry === 'number' ? entry : entry?.port;
         const protocol = (typeof entry === 'object' && entry?.protocol === 'https') ? 'https:' : 'http:';
@@ -1817,8 +2010,7 @@
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (hasLiveSocket()) return;
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(`${protocol}//${window.location.host}`);
+      const socket = new WebSocket(wsUrl());
       ws = socket;
 
       socket.onopen = () => {
@@ -1923,7 +2115,7 @@
       // Set initial active pane if not set
       if (!activePaneId && allPanes.length > 0) {
         // Try to restore from localStorage
-        const savedPaneId = storage.get(STORAGE_KEYS.activePane);
+        const savedPaneId = storage.get(STORAGE_KEYS.activePane());
         const savedPane = savedPaneId && allPanes.find(p => p.id === savedPaneId);
         if (savedPane) {
           activePaneId = savedPane.id;
@@ -2272,6 +2464,261 @@
 
     agentPickerBackdrop.addEventListener('click', closeAgentPicker);
 
+    // ============================================
+    // DEVICE SWITCHER SHEET
+    // ============================================
+    const deviceSheet = document.getElementById('deviceSheet');
+    const deviceSheetBackdrop = document.getElementById('deviceSheetBackdrop');
+    const deviceSheetOptions = document.getElementById('deviceSheetOptions');
+    const deviceBtnLabel = document.getElementById('deviceBtnLabel');
+
+    const DEVICE_ICON_PATHS = [
+      'M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z',
+      'M8 21h8',
+      'M12 17v4'
+    ];
+
+    function updateDeviceButton() {
+      deviceBtnLabel.textContent = getActiveDevice().name;
+    }
+
+    function openDeviceSheet() {
+      renderDeviceSheet();
+      deviceSheet.classList.add('open');
+      deviceSheetBackdrop.classList.add('open');
+    }
+
+    // One-shot reachability probe per device, fired when the sheet renders.
+    // Rows render immediately in their normal state and dim as failures
+    // come back — no blocking, no flicker for healthy devices. The seq
+    // guard discards results that land after the sheet re-rendered.
+    let deviceProbeSeq = 0;
+
+    function probeDevice(dev, timeoutMs) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const url = `${dev.protocol === 'https' ? 'https' : 'http'}://${dev.host}:${dev.port}/api/health`;
+      return fetch(url, { signal: controller.signal, cache: 'no-store' })
+        .then(res => res.ok)
+        .catch(() => false)
+        .finally(() => clearTimeout(timer));
+    }
+
+    function probeDevicesForSheet() {
+      const seq = ++deviceProbeSeq;
+      for (const dev of allDevices()) {
+        probeDevice(dev, 2500).then(ok => {
+          if (seq !== deviceProbeSeq) return;
+          const row = deviceSheetOptions.querySelector(`[data-device-id="${dev.id}"]`);
+          if (!row) return;
+          row.classList.toggle('device-offline', !ok);
+          const hostEl = row.querySelector('.device-option-host');
+          if (hostEl) {
+            hostEl.textContent = `${dev.host}:${dev.port}${ok ? '' : ' — unreachable'}`;
+          }
+        });
+      }
+    }
+
+    function closeDeviceSheet() {
+      deviceSheet.classList.remove('open');
+      deviceSheetBackdrop.classList.remove('open');
+    }
+
+    deviceSheetBackdrop.addEventListener('click', closeDeviceSheet);
+
+    function renderDeviceSheet() {
+      deviceSheetOptions.replaceChildren();
+
+      for (const dev of allDevices()) {
+        const opt = document.createElement('div');
+        opt.className = 'tab-action-option';
+        opt.dataset.deviceId = dev.id;
+        opt.appendChild(svgEl(
+          { viewBox: '0 0 24 24', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+          DEVICE_ICON_PATHS
+        ));
+
+        const label = document.createElement('div');
+        label.className = 'device-option-label';
+        const nameEl = document.createElement('div');
+        nameEl.textContent = dev.name;
+        const hostEl = document.createElement('div');
+        hostEl.className = 'device-option-host';
+        hostEl.textContent = `${dev.host}:${dev.port}`;
+        label.appendChild(nameEl);
+        label.appendChild(hostEl);
+        opt.appendChild(label);
+
+        if (dev.id === activeDeviceId) {
+          opt.appendChild(svgEl(
+            { viewBox: '0 0 24 24', class: 'device-option-check', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+            ['M20 6 9 17l-5-5']
+          ));
+        } else if (dev.id !== 'local') {
+          const removeBtn = document.createElement('button');
+          removeBtn.className = 'device-option-remove';
+          removeBtn.setAttribute('aria-label', `Remove ${dev.name}`);
+          removeBtn.appendChild(svgEl(
+            { viewBox: '0 0 24 24', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+            ['M18 6 6 18', 'm6 6 12 12']
+          ));
+          removeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeDevice(dev.id);
+          });
+          opt.appendChild(removeBtn);
+        }
+
+        opt.addEventListener('click', () => {
+          closeDeviceSheet();
+          switchDevice(dev.id);
+        });
+        deviceSheetOptions.appendChild(opt);
+      }
+
+      const addOpt = document.createElement('div');
+      addOpt.className = 'tab-action-option';
+      addOpt.appendChild(svgEl(
+        { viewBox: '0 0 24 24', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+        ['M12 5v14', 'M5 12h14']
+      ));
+      addOpt.appendChild(document.createTextNode('Add device'));
+      addOpt.addEventListener('click', showAddDeviceForm);
+      deviceSheetOptions.appendChild(addOpt);
+
+      probeDevicesForSheet();
+    }
+
+    function showAddDeviceForm() {
+      deviceSheetOptions.replaceChildren();
+
+      const hostInput = document.createElement('input');
+      hostInput.type = 'text';
+      hostInput.className = 'tab-rename-input';
+      hostInput.placeholder = 'Hostname (e.g. linuxbox.tailnet.ts.net)';
+      hostInput.autocapitalize = 'none';
+      hostInput.autocomplete = 'off';
+      hostInput.spellcheck = false;
+      deviceSheetOptions.appendChild(hostInput);
+
+      const portInput = document.createElement('input');
+      portInput.type = 'text';
+      portInput.className = 'tab-rename-input';
+      portInput.inputMode = 'numeric';
+      portInput.placeholder = 'Port';
+      portInput.value = '7337';
+      deviceSheetOptions.appendChild(portInput);
+
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.className = 'tab-rename-input';
+      nameInput.placeholder = 'Name (optional)';
+      nameInput.autocomplete = 'off';
+      deviceSheetOptions.appendChild(nameInput);
+
+      const actions = document.createElement('div');
+      actions.className = 'tab-rename-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'tab-rename-cancel';
+      cancelBtn.textContent = 'Cancel';
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'tab-rename-save';
+      saveBtn.textContent = 'Add';
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+      deviceSheetOptions.appendChild(actions);
+
+      hostInput.focus();
+
+      const saveDevice = () => {
+        let host = hostInput.value.trim();
+        let port = parseInt(portInput.value.trim(), 10);
+
+        // Be forgiving about pasted URLs: extract hostname (and port if
+        // the pasted value carries one and the port field is untouched).
+        if (host.includes('://')) {
+          try {
+            const parsed = new URL(host);
+            host = parsed.hostname;
+            if (parsed.port && portInput.value.trim() === '7337') {
+              port = parseInt(parsed.port, 10);
+            }
+          } catch {}
+        }
+
+        if (!host || !/^[A-Za-z0-9.\-:\[\]]+$/.test(host)) {
+          hostInput.style.borderColor = '#e53935';
+          return;
+        }
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          portInput.style.borderColor = '#e53935';
+          return;
+        }
+        const name = nameInput.value.trim() || host.split('.')[0];
+        const id = 'd' + Math.random().toString(36).slice(2, 8);
+        customDevices.push({ id, name, host, port, protocol: 'http' });
+        saveCustomDevices();
+        renderDeviceSheet();
+      };
+
+      saveBtn.addEventListener('click', saveDevice);
+      cancelBtn.addEventListener('click', renderDeviceSheet);
+      for (const input of [hostInput, portInput, nameInput]) {
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); saveDevice(); }
+          else if (e.key === 'Escape') renderDeviceSheet();
+        });
+      }
+    }
+
+    function removeDevice(deviceId) {
+      // Removing the device you're on bounces you back to the local relay
+      // first so all state lands in a consistent namespace.
+      if (deviceId === activeDeviceId) switchDevice('local');
+      customDevices = customDevices.filter(d => d.id !== deviceId);
+      saveCustomDevices();
+      renderDeviceSheet();
+    }
+
+    // Tear down everything tied to the current relay and boot against the
+    // chosen one — same code path as initial page load, so reconnect/backoff,
+    // pane restore, and the agent registry all behave exactly like a fresh
+    // open of that device's own URL.
+    function switchDevice(deviceId) {
+      if (deviceId === activeDeviceId) return;
+      if (!allDevices().some(d => d.id === deviceId)) return;
+
+      // Persist the draft under the OLD device's keys before the namespace flips.
+      if (activePaneId) savePaneState(activePaneId);
+
+      activeDeviceId = deviceId;
+      storage.set(ACTIVE_DEVICE_STORAGE_KEY, deviceId);
+
+      closeSocket(true);
+      connected = false;
+      paneStates = new Map();
+      allPanes = [];
+      activePaneId = null;
+      activePaneTarget = null;
+      agents = defaultAgents();
+      agentsFetched = false;
+      clearPendingImages(); // upload tokens only exist on the old relay
+      messageInput.value = '';
+      messageInput.style.height = 'auto';
+      lastCols = 0;
+      reconnectDelay = RECONNECT_MIN;
+
+      updateStatus();
+      renderOutput();
+      renderPaneTabs();
+      updateModeActionButton();
+      updateDeviceButton();
+
+      initializeFromREST();
+      connect();
+    }
+
     // Close a window
     async function closeWindow(target) {
       // Don't allow closing the last window
@@ -2280,7 +2727,7 @@
       }
 
       try {
-        const res = await fetch('/api/panes/close', {
+        const res = await fetch(apiUrl('/api/panes/close'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ target })
@@ -2305,7 +2752,7 @@
         // shell paints its first prompt — otherwise tmux creates the window at
         // its default width and the first prompt's ruler line wraps visibly.
         const cols = calculateColumns();
-        const res = await fetch('/api/panes', {
+        const res = await fetch(apiUrl('/api/panes'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cols })
@@ -2338,7 +2785,7 @@
       // Set new active pane
       activePaneId = pane.id;
       activePaneTarget = pane.target;
-      storage.set(STORAGE_KEYS.activePane, paneId);
+      storage.set(STORAGE_KEYS.activePane(), paneId);
 
       // Restore state for new pane
       restorePaneState(paneId);
@@ -2361,7 +2808,7 @@
       if (isSocketUsable()) {
         ws.send(JSON.stringify({ type: 'switchPane', paneId }));
       } else if (pane.target) {
-        fetch(`/api/output?target=${encodeURIComponent(pane.target)}`)
+        fetch(apiUrl(`/api/output?target=${encodeURIComponent(pane.target)}`))
           .then(res => res.json())
           .then(data => {
             if (data.output) {
@@ -2435,7 +2882,7 @@
         return Promise.resolve(true);
       }
 
-      return fetch('/api/send', {
+      return fetch(apiUrl('/api/send'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: command, target })
@@ -2465,7 +2912,7 @@
       // that preceded it from tmux scrollback so the canvas shows only the
       // agent UI instead of the echoed launch command first.
       setTimeout(() => {
-        fetch('/api/clear-history', {
+        fetch(apiUrl('/api/clear-history'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ target })
@@ -2512,7 +2959,7 @@
       // for text-only and keys). The tokens payload is tiny — just string
       // IDs — so the 16 KB-scale global JSON limit is plenty.
       if (tokens.length > 0) {
-        fetch('/api/send', {
+        fetch(apiUrl('/api/send'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2540,7 +2987,7 @@
         return;
       }
 
-      fetch('/api/send', {
+      fetch(apiUrl('/api/send'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, target: activePaneTarget })
@@ -2564,7 +3011,7 @@
         return;
       }
 
-      fetch('/api/key', {
+      fetch(apiUrl('/api/key'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, target: activePaneTarget })
@@ -2793,12 +3240,22 @@
     // ============================================
     // LOCAL STORAGE PERSISTENCE
     // ============================================
+    // Keys are scoped to the active device: tmux pane ids (%0, %1, ...) are
+    // only unique within one machine's tmux server, so unscoped keys would
+    // bleed drafts and tab names across devices. The local device keeps the
+    // legacy unprefixed keys so saved state survives this upgrade.
+    function deviceScopedKey(suffix) {
+      const devId = getActiveDevice().id;
+      return devId === 'local'
+        ? `claude-relay-${suffix}`
+        : `claude-relay-${devId}-${suffix}`;
+    }
     const STORAGE_KEYS = {
       // Per-pane keys
-      inputText: (paneId) => `claude-relay-input-${paneId}`,
-      tabName: (paneId) => `claude-relay-tabname-${paneId}`,
+      inputText: (paneId) => deviceScopedKey(`input-${paneId}`),
+      tabName: (paneId) => deviceScopedKey(`tabname-${paneId}`),
       // Global keys
-      activePane: 'claude-relay-active-pane'
+      activePane: () => deviceScopedKey('active-pane')
     };
 
     // Note: Input text is now restored per-pane in restorePaneState()
@@ -2848,14 +3305,14 @@
       if (!agentsFetched) fetchAgents();
       try {
         // Fetch pane list
-        const panesRes = await fetch('/api/panes', { signal: controller.signal, cache: 'no-store' });
+        const panesRes = await fetch(apiUrl('/api/panes'), { signal: controller.signal, cache: 'no-store' });
         const panesData = await panesRes.json();
         if (seq !== restInitSeq) return;
         handlePaneList(panesData.panes);
 
         // Fetch output for active pane
         if (activePaneTarget) {
-          const outputRes = await fetch(`/api/output?target=${encodeURIComponent(activePaneTarget)}`, {
+          const outputRes = await fetch(apiUrl(`/api/output?target=${encodeURIComponent(activePaneTarget)}`), {
             signal: controller.signal,
             cache: 'no-store'
           });
@@ -2870,6 +3327,15 @@
         if (e.name !== 'AbortError') {
           console.error('REST init failed:', e);
         }
+        // Active device didn't answer on a foreground boot (page load or
+        // device switch) and we have somewhere else to go: surface the
+        // device sheet so recovery is one tap. Reachability probes mark
+        // the dead device. Background resume-syncs never do this — a
+        // cellular blip shouldn't pop UI over the terminal.
+        if (!background && seq === restInitSeq && allPanes.length === 0
+            && allDevices().length > 1 && !deviceSheet.classList.contains('open')) {
+          openDeviceSheet();
+        }
       } finally {
         clearTimeout(timeoutId);
         if (!background && seq === restInitSeq && isSocketUsable()) {
@@ -2880,6 +3346,7 @@
     }
 
     // Initialize immediately via REST, then connect WebSocket for live updates
+    updateDeviceButton();
     initializeFromREST();
     connect();
   </script>

@@ -26,6 +26,10 @@ keep coding from their phone without giving up their local environment.
 - **Attach images**: tap the paperclip to send photos or screenshots
   alongside your message. Works with Claude Code's native vision —
   images are compressed client-side and uploaded in parallel.
+- **Multiple devices**: run the relay on every machine you work on
+  and jump between them from the device switcher in the header —
+  same tabs, same workflow, per machine. See
+  [Multiple devices](#multiple-devices).
 - **Self-healing**: the LaunchAgent (macOS) or systemd user service
   (Linux) restarts the relay on crash. If tmux itself dies, the next
   500ms poll creates a fresh session and the phone reconnects.
@@ -298,6 +302,43 @@ CLI — aider or opencode pointed at an Ollama model, a llama.cpp
 wrapper script — is launchable as long as it's a command you could
 type into a terminal. Restart the relay (`./relay restart`) after
 editing the file.
+
+## Multiple devices
+
+If you have more than one machine running the relay (a Mac and a
+headless Linux box, say), the device button in the header switches
+between them without leaving the app — important if you installed
+the UI as a home-screen PWA, where navigating to a different URL
+would kick you out to the browser.
+
+Setup:
+
+1. Install and run the relay on each machine (each needs its own
+   `./relay install`; they don't need the same port).
+2. Make sure your phone can reach each machine — same tailnet is the
+   usual answer.
+3. On the phone, tap the device button (top right), then
+   **Add device**, and enter the machine's MagicDNS hostname and
+   relay port.
+
+Switching tears down the current connection and boots against the
+chosen relay: its own tmux windows become your tabs, and the agent
+picker re-probes *that* machine, so it offers exactly the CLIs
+installed there. Tab names, drafts, and the active tab are
+remembered per device. The device list lives in your phone browser's
+storage, so each browser/PWA install manages its own list.
+
+Every machine in the list must run the relay itself, which means
+macOS or Linux with tmux — a phone, tablet, or Windows box can't be
+a target device (they can all be *clients*, though; any browser that
+can reach a relay can drive it).
+
+Cross-device calls are protected by an origin allowlist: a relay
+only accepts browser requests from origins that can't exist on the
+public internet (`*.ts.net`, `*.local`, single-label hostnames,
+localhost, and private/CGNAT IPs). No configuration needed — but if
+you serve the UI from a public domain someday, the switcher will
+refuse to work by design.
 
 ## How it works
 
