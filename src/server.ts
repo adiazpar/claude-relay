@@ -5,8 +5,9 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
 import crypto from 'crypto'
-import { tmuxBridge } from './tmux-bridge.js'
+import { bridge } from './bridge-instance.js'
 import { getAgents, getAgentsForClient } from './agents.js'
+import { getShellsForClient } from './shells.js'
 import { PORT } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -114,9 +115,9 @@ function toLines(text: string): string[] {
 }
 
 // Accept only values that match a currently-known pane target. Returns null if invalid.
-function validatePaneTarget(target: unknown): string | null {
+async function validatePaneTarget(target: unknown): Promise<string | null> {
   if (typeof target !== 'string' || target.length === 0 || target.length > 128) return null
-  const panes = tmuxBridge.listPanes()
+  const panes = await bridge.listPanes()
   return panes.some(p => p.target === target) ? target : null
 }
 
@@ -127,13 +128,23 @@ function validateDimension(value: unknown, min: number, max: number): number | u
   return n
 }
 
-// Only allow absolute, reasonably-short paths (no nulls). tmux will reject nonexistent dirs itself.
+// Only allow absolute, reasonably-short paths (no nulls). The backend
+// (tmux or the pane-host) rejects nonexistent dirs itself. win32's
+// path.isAbsolute accepts both `C:\...` and `/` forms.
 function validateCwd(cwd: unknown): string | null {
   if (typeof cwd !== 'string') return null
   if (cwd.length === 0 || cwd.length > 4096) return null
   if (cwd.includes('\0')) return null
   if (!path.isAbsolute(cwd)) return null
   return cwd
+}
+
+// Shell ids are registry-defined slugs ("pwsh", "git-bash", "wsl:Ubuntu").
+// The bridge validates against the actual registry; this just rejects junk.
+function validateShellId(shellId: unknown): string | undefined {
+  if (typeof shellId !== 'string') return undefined
+  if (!/^[a-z0-9][a-z0-9:._ -]{0,63}$/i.test(shellId)) return undefined
+  return shellId
 }
 
 type SaveResult =
@@ -259,11 +270,12 @@ const wss = new WebSocketServer({
 
 const HOST = process.env.HOST || '0.0.0.0' // Listen on all interfaces for Tailscale
 
-function serializePanes() {
-  return tmuxBridge.listPanes().map(pane => ({
+async function serializePanes() {
+  const panes = await bridge.listPanes()
+  return Promise.all(panes.map(async pane => ({
     ...pane,
-    ...tmuxBridge.getPaneRuntimeState(pane.target)
-  }))
+    ...await bridge.getPaneRuntimeState(pane.target)
+  })))
 }
 
 // Serve static files
@@ -302,11 +314,12 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '128kb' }))
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
+// Health check endpoint. The key is still named tmuxSession for client
+// back-compat; on Windows it reports pane-host health.
+app.get('/api/health', async (req, res) => {
   res.json({
     status: 'ok',
-    tmuxSession: tmuxBridge.sessionExists()
+    tmuxSession: await bridge.sessionExists()
   })
 })
 
@@ -322,31 +335,45 @@ app.get('/api/agents', async (req, res) => {
   }
 })
 
+// Shells available for new panes. On macOS/Linux this is a single default
+// entry (tmux windows always run the user's shell); on Windows it lists
+// PowerShell/cmd/Git Bash/WSL distros so the client can offer a picker.
+app.get('/api/shells', async (req, res) => {
+  try {
+    const shells = await getShellsForClient()
+    res.json({ shells })
+  } catch (error) {
+    console.error('Error listing shells:', error)
+    res.status(500).json({ error: 'Failed to list shells' })
+  }
+})
+
 // Get current pane content
-app.get('/api/output', (req, res) => {
+app.get('/api/output', async (req, res) => {
   const rawTarget = req.query.target as string | undefined
-  const target = rawTarget ? validatePaneTarget(rawTarget) ?? undefined : undefined
-  const output = tmuxBridge.getFullOutput(target)
+  const target = rawTarget ? await validatePaneTarget(rawTarget) ?? undefined : undefined
+  const output = await bridge.getFullOutput(target)
   res.json({ output })
 })
 
 // Get all available panes
-app.get('/api/panes', (req, res) => {
-  const panes = serializePanes()
+app.get('/api/panes', async (req, res) => {
+  const panes = await serializePanes()
   res.json({ panes })
 })
 
 // Create a new window
-app.post('/api/panes', (req, res) => {
+app.post('/api/panes', async (req, res) => {
   const cwd = validateCwd(req.body?.cwd) ?? undefined
   const cols = validateDimension(req.body?.cols, 40, 300)
   const rows = validateDimension(req.body?.rows, 10, 100)
-  const newPane = tmuxBridge.createWindow(cwd, cols, rows)
+  const shellId = validateShellId(req.body?.shellId)
+  const newPane = await bridge.createWindow({ cwd, cols, rows, shellId })
   if (newPane) {
     res.json({
       success: true,
-      pane: { ...newPane, ...tmuxBridge.getPaneRuntimeState(newPane.target) },
-      panes: serializePanes()
+      pane: { ...newPane, ...await bridge.getPaneRuntimeState(newPane.target) },
+      panes: await serializePanes()
     })
   } else {
     res.status(500).json({ success: false, error: 'Failed to create window' })
@@ -354,27 +381,27 @@ app.post('/api/panes', (req, res) => {
 })
 
 // Close a window
-app.post('/api/panes/close', (req, res) => {
-  const target = validatePaneTarget(req.body?.target)
+app.post('/api/panes/close', async (req, res) => {
+  const target = await validatePaneTarget(req.body?.target)
   if (!target) {
     return res.status(400).json({ success: false, error: 'Valid target required' })
   }
-  const success = tmuxBridge.closeWindow(target)
+  const success = await bridge.closeWindow(target)
   if (success) {
-    res.json({ success: true, panes: serializePanes() })
+    res.json({ success: true, panes: await serializePanes() })
   } else {
     res.status(500).json({ success: false, error: 'Failed to close window' })
   }
 })
 
-// Drop tmux scrollback for a pane (used after launching an agent so the pre-TUI
+// Drop scrollback for a pane (used after launching an agent so the pre-TUI
 // command echoes don't sit above Claude's UI in the canvas).
-app.post('/api/clear-history', (req, res) => {
-  const target = validatePaneTarget(req.body?.target)
+app.post('/api/clear-history', async (req, res) => {
+  const target = await validatePaneTarget(req.body?.target)
   if (!target) {
     return res.status(400).json({ success: false, error: 'Valid target required' })
   }
-  const success = tmuxBridge.clearHistory(target)
+  const success = await bridge.clearHistory(target)
   res.json({ success })
 })
 
@@ -408,7 +435,7 @@ app.post(
 // Send a message, optionally with a list of upload tokens for images the
 // client already uploaded via /api/upload. Tokens resolve to paths and
 // get typed into the pane alongside the message.
-app.post('/api/send', (req, res) => {
+app.post('/api/send', async (req, res) => {
   const message = typeof req.body?.message === 'string' ? req.body.message : ''
   const hasTokens = Array.isArray(req.body?.tokens) && req.body.tokens.length > 0
 
@@ -419,7 +446,7 @@ app.post('/api/send', (req, res) => {
     return res.status(413).json({ success: false, error: 'Message too large' })
   }
 
-  const target = validatePaneTarget(req.body?.target)
+  const target = await validatePaneTarget(req.body?.target)
   if (!target) {
     return res.status(400).json({ success: false, error: 'Valid target required' })
   }
@@ -433,7 +460,7 @@ app.post('/api/send', (req, res) => {
     imagePaths = result.paths
   }
 
-  const success = tmuxBridge.sendMessage(message, target, imagePaths)
+  const success = await bridge.sendMessage(message, target, imagePaths)
   if (imagePaths) {
     for (const p of imagePaths) scheduleUnlink(p, UPLOAD_CLEANUP_DELAY_MS)
   }
@@ -442,17 +469,17 @@ app.post('/api/send', (req, res) => {
 })
 
 // Send a whitelisted key via REST (fallback)
-app.post('/api/key', (req, res) => {
+app.post('/api/key', async (req, res) => {
   const key = req.body?.key
   if (typeof key !== 'string' || key.length === 0) {
     return res.status(400).json({ error: 'Key required' })
   }
 
-  const target = validatePaneTarget(req.body?.target)
+  const target = await validatePaneTarget(req.body?.target)
   if (!target) {
     return res.status(400).json({ error: 'Valid target required' })
   }
-  const success = tmuxBridge.sendKey(key, target)
+  const success = await bridge.sendKey(key, target)
   res.json({ success })
 })
 
@@ -463,11 +490,11 @@ interface ClientState {
 }
 const clientStates = new WeakMap<WebSocket, ClientState>()
 
-function resolveClientPaneTarget(clientState?: ClientState): string | null {
+async function resolveClientPaneTarget(clientState?: ClientState): Promise<string | null> {
   if (!clientState) return null
 
   const validatedTarget = clientState.activePaneTarget
-    ? validatePaneTarget(clientState.activePaneTarget)
+    ? await validatePaneTarget(clientState.activePaneTarget)
     : null
   if (validatedTarget) {
     clientState.activePaneTarget = validatedTarget
@@ -475,7 +502,8 @@ function resolveClientPaneTarget(clientState?: ClientState): string | null {
   }
 
   if (!clientState.activePane) return null
-  const pane = tmuxBridge.listPanes().find(p => p.id === clientState.activePane)
+  const panes = await bridge.listPanes()
+  const pane = panes.find(p => p.id === clientState.activePane)
   if (!pane) return null
 
   clientState.activePaneTarget = pane.target
@@ -483,7 +511,7 @@ function resolveClientPaneTarget(clientState?: ClientState): string | null {
 }
 
 // WebSocket handling for real-time communication
-wss.on('connection', (ws: WebSocket) => {
+wss.on('connection', async (ws: WebSocket) => {
   console.log('Client connected')
 
   // Prevent unhandled 'error' from crashing the process
@@ -491,32 +519,9 @@ wss.on('connection', (ws: WebSocket) => {
     console.error('WebSocket error:', error)
   })
 
-  // Initialize client state
-  const panes = serializePanes()
-  const initialPane = panes[0] || null
-  clientStates.set(ws, {
-    activePane: initialPane?.id || null,
-    activePaneTarget: initialPane?.target || null
-  })
-
-  // Send pane list
-  ws.send(JSON.stringify({
-    type: 'paneList',
-    panes
-  }))
-
-  // Send current output for first pane
-  if (initialPane) {
-    ws.send(JSON.stringify({
-      type: 'output',
-      paneId: initialPane.id,
-      lines: toLines(tmuxBridge.getFullOutput(initialPane.target)),
-      mode: tmuxBridge.detectMode(initialPane.target)
-    }))
-  }
-
-  // Handle incoming messages
-  ws.on('message', (data: Buffer) => {
+  // Handle incoming messages. Registered before the initial awaits so no
+  // early client frame is dropped.
+  ws.on('message', async (data: Buffer) => {
     let msg: any
     try {
       msg = JSON.parse(data.toString('utf-8'))
@@ -528,25 +533,25 @@ wss.on('connection', (ws: WebSocket) => {
     try {
       const clientState = clientStates.get(ws)
       // Resolve the pane target: either client-provided (validated) or the active one
-      const requestedTarget = typeof msg.paneTarget === 'string' ? validatePaneTarget(msg.paneTarget) : null
-      const paneTarget = requestedTarget ?? resolveClientPaneTarget(clientState)
+      const requestedTarget = typeof msg.paneTarget === 'string' ? await validatePaneTarget(msg.paneTarget) : null
+      const paneTarget = requestedTarget ?? await resolveClientPaneTarget(clientState)
 
       if (msg.type === 'switchPane') {
         // Client is switching to a different pane
-        const panes = serializePanes()
+        const panes = await serializePanes()
         const pane = panes.find(p => p.id === msg.paneId)
         if (pane && clientState) {
           clientState.activePane = pane.id
           clientState.activePaneTarget = pane.target
           // Select the window in tmux (makes it visible in terminal)
-          tmuxBridge.selectWindow(pane.target)
+          await bridge.selectWindow(pane.target)
           // Send output for the new pane
           ws.send(JSON.stringify({
             type: 'output',
             paneId: pane.id,
-            lines: toLines(tmuxBridge.getFullOutput(pane.target)),
-            mode: tmuxBridge.detectMode(pane.target),
-            ...tmuxBridge.getPaneRuntimeState(pane.target)
+            lines: toLines(await bridge.getFullOutput(pane.target)),
+            mode: await bridge.detectMode(pane.target),
+            ...await bridge.getPaneRuntimeState(pane.target)
           }))
         }
       } else if (msg.type === 'send') {
@@ -559,7 +564,7 @@ wss.on('connection', (ws: WebSocket) => {
           ws.send(JSON.stringify({ type: 'sent', success: false, error: 'No active pane target' }))
           return
         }
-        const success = tmuxBridge.sendMessage(msg.content, paneTarget)
+        const success = await bridge.sendMessage(msg.content, paneTarget)
         ws.send(JSON.stringify({
           type: 'sent',
           success,
@@ -572,7 +577,7 @@ wss.on('connection', (ws: WebSocket) => {
           ws.send(JSON.stringify({ type: 'keySent', success: false, error: 'No active pane target', key: msg.key }))
           return
         }
-        const success = tmuxBridge.sendKey(msg.key, paneTarget)
+        const success = await bridge.sendKey(msg.key, paneTarget)
         ws.send(JSON.stringify({
           type: 'keySent',
           success,
@@ -581,7 +586,7 @@ wss.on('connection', (ws: WebSocket) => {
         }))
       } else if (msg.type === 'refresh') {
         // Refresh pane list
-        const panes = serializePanes()
+        const panes = await serializePanes()
         ws.send(JSON.stringify({
           type: 'paneList',
           panes
@@ -591,35 +596,39 @@ wss.on('connection', (ws: WebSocket) => {
         ws.send(JSON.stringify({
           type: 'output',
           paneId: clientState?.activePane,
-          lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
-          mode: tmuxBridge.detectMode(paneTarget),
-          ...tmuxBridge.getPaneRuntimeState(paneTarget)
+          lines: toLines(await bridge.getFullOutput(paneTarget)),
+          mode: await bridge.detectMode(paneTarget),
+          ...await bridge.getPaneRuntimeState(paneTarget)
         }))
       } else if (msg.type === 'resize') {
         const cols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
         if (!Number.isInteger(cols) || cols <= 0 || cols > 1000) return
         if (!paneTarget) return
-        const success = tmuxBridge.resizePane(cols, undefined, paneTarget)
+        const success = await bridge.resizePane(cols, undefined, paneTarget)
         if (success) {
           // After resize, send updated output
-          setTimeout(() => {
-            ws.send(JSON.stringify({
-              type: 'output',
-              paneId: clientState?.activePane,
-              lines: toLines(tmuxBridge.getFullOutput(paneTarget)),
-              mode: tmuxBridge.detectMode(paneTarget),
-              ...tmuxBridge.getPaneRuntimeState(paneTarget)
-            }))
+          setTimeout(async () => {
+            try {
+              ws.send(JSON.stringify({
+                type: 'output',
+                paneId: clientState?.activePane,
+                lines: toLines(await bridge.getFullOutput(paneTarget)),
+                mode: await bridge.detectMode(paneTarget),
+                ...await bridge.getPaneRuntimeState(paneTarget)
+              }))
+            } catch (err) {
+              console.error('Failed to send post-resize output:', err)
+            }
           }, 100)
         }
       } else if (msg.type === 'typing') {
-        tmuxBridge.setTypingState(msg.isTyping === true)
+        bridge.setTypingState(msg.isTyping === true)
       } else if (msg.type === 'serverStop') {
         if (!paneTarget) {
           ws.send(JSON.stringify({ type: 'serverAction', action: 'stop', success: false, error: 'No active pane target' }))
           return
         }
-        const success = tmuxBridge.stopServer(paneTarget)
+        const success = await bridge.stopServer(paneTarget)
         ws.send(JSON.stringify({
           type: 'serverAction',
           action: 'stop',
@@ -631,7 +640,7 @@ wss.on('connection', (ws: WebSocket) => {
           ws.send(JSON.stringify({ type: 'serverAction', action: 'restart', success: false, error: 'No active pane target' }))
           return
         }
-        const success = tmuxBridge.restartServer(paneTarget)
+        const success = await bridge.restartServer(paneTarget)
         ws.send(JSON.stringify({
           type: 'serverAction',
           action: 'restart',
@@ -648,31 +657,63 @@ wss.on('connection', (ws: WebSocket) => {
     console.log('Client disconnected')
     clientStates.delete(ws)
   })
+
+  try {
+    // Initialize client state
+    const panes = await serializePanes()
+    const initialPane = panes[0] || null
+    clientStates.set(ws, {
+      activePane: initialPane?.id || null,
+      activePaneTarget: initialPane?.target || null
+    })
+
+    // Send pane list
+    ws.send(JSON.stringify({
+      type: 'paneList',
+      panes
+    }))
+
+    // Send current output for first pane
+    if (initialPane) {
+      ws.send(JSON.stringify({
+        type: 'output',
+        paneId: initialPane.id,
+        lines: toLines(await bridge.getFullOutput(initialPane.target)),
+        mode: await bridge.detectMode(initialPane.target)
+      }))
+    }
+  } catch (error) {
+    console.error('Error initializing WS client:', error)
+  }
 })
 
-// Forward tmux output changes to clients watching that pane
-tmuxBridge.on('output', (rawContent: string, paneId: string, paneTarget: string) => {
-  const message = JSON.stringify({
-    type: 'output',
-    paneId,
-    lines: toLines(rawContent),
-    mode: tmuxBridge.detectMode(paneTarget),
-    ...tmuxBridge.getPaneRuntimeState(paneTarget)
-  })
+// Forward pane output changes to clients watching that pane
+bridge.on('output', async (rawContent: string, paneId: string, paneTarget: string) => {
+  try {
+    const message = JSON.stringify({
+      type: 'output',
+      paneId,
+      lines: toLines(rawContent),
+      mode: await bridge.detectMode(paneTarget),
+      ...await bridge.getPaneRuntimeState(paneTarget)
+    })
 
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      const clientState = clientStates.get(client)
-      // Send to clients watching this pane
-      if (clientState?.activePane === paneId) {
-        try {
-          client.send(message)
-        } catch (err) {
-          console.error('Failed to send to client:', err)
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        const clientState = clientStates.get(client)
+        // Send to clients watching this pane
+        if (clientState?.activePane === paneId) {
+          try {
+            client.send(message)
+          } catch (err) {
+            console.error('Failed to send to client:', err)
+          }
         }
       }
-    }
-  })
+    })
+  } catch (error) {
+    console.error('Error forwarding output:', error)
+  }
 })
 
 // Heartbeat: send a tiny ping to every open client so the browser can detect
@@ -688,16 +729,20 @@ setInterval(() => {
 }, HEARTBEAT_INTERVAL_MS)
 
 // Broadcast per-pane runtime state to all clients so every tab's button can
-// reflect current claudeRunning/shellReady regardless of which pane is active.
-function broadcastRuntimeStates() {
+// reflect current agent/shell state regardless of which pane is active.
+async function broadcastRuntimeStates() {
   if (wss.clients.size === 0) return
-  const states = tmuxBridge.getAllPaneRuntimeStates()
-  const payload = JSON.stringify({ type: 'paneRuntimeList', states })
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      try { client.send(payload) } catch {}
-    }
-  })
+  try {
+    const states = await bridge.getAllPaneRuntimeStates()
+    const payload = JSON.stringify({ type: 'paneRuntimeList', states })
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        try { client.send(payload) } catch {}
+      }
+    })
+  } catch (error) {
+    console.error('Error broadcasting runtime states:', error)
+  }
 }
 
 // An async TLS probe that upgrades a newly-seen port from the default http
@@ -705,45 +750,42 @@ function broadcastRuntimeStates() {
 // probes only triggers one extra broadcast, and so we don't race the next
 // scheduled 2s tick.
 let earlyBroadcastTimer: NodeJS.Timeout | null = null
-tmuxBridge.on('protocolResolved', () => {
+bridge.on('protocolResolved', () => {
   if (earlyBroadcastTimer) return
   earlyBroadcastTimer = setTimeout(() => {
     earlyBroadcastTimer = null
-    broadcastRuntimeStates()
+    void broadcastRuntimeStates()
   }, 80)
 })
 
-// tmux session was auto-recreated (user killed it, tmux crashed). The fresh
-// session has new pane IDs, so clients need a fresh paneList — otherwise
-// they'd sit on stale state until they refreshed manually. Clients already
-// handle "my activePane disappeared" inside handlePaneList by switching to
-// the first available pane.
-tmuxBridge.on('sessionRecreated', () => {
+// The terminal session was auto-recreated (user killed tmux, the pane-host
+// died, etc). The fresh session has new pane IDs, so clients need a fresh
+// paneList — otherwise they'd sit on stale state until they refreshed
+// manually. Clients already handle "my activePane disappeared" inside
+// handlePaneList by switching to the first available pane.
+bridge.on('sessionRecreated', async () => {
   if (wss.clients.size === 0) return
-  const panes = serializePanes()
-  const payload = JSON.stringify({ type: 'paneList', panes })
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      try { client.send(payload) } catch {}
-    }
-  })
-  broadcastRuntimeStates()
+  try {
+    const panes = await serializePanes()
+    const payload = JSON.stringify({ type: 'paneList', panes })
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        try { client.send(payload) } catch {}
+      }
+    })
+    void broadcastRuntimeStates()
+  } catch (error) {
+    console.error('Error handling sessionRecreated:', error)
+  }
 })
 
 const PANE_STATE_BROADCAST_MS = 2000
 setInterval(() => {
-  if (wss.clients.size === 0) return
-  const states = tmuxBridge.getAllPaneRuntimeStates()
-  const payload = JSON.stringify({ type: 'paneRuntimeList', states })
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      try { client.send(payload) } catch {}
-    }
-  })
+  void broadcastRuntimeStates()
 }, PANE_STATE_BROADCAST_MS)
 
 // Start polling for output changes
-tmuxBridge.startPolling()
+bridge.startPolling()
 
 // JSON error handler — catches body-parser rejections (oversized payloads,
 // malformed JSON) so clients parsing xhr.responseText always get a JSON
@@ -762,19 +804,22 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 })
 
 httpServer.listen(PORT, HOST, () => {
-  console.log(`
+  void (async () => {
+    const sessionUp = await bridge.sessionExists()
+    console.log(`
   Claude Relay Server
   ------------------------------------------------------------
   Listening on http://${HOST}:${PORT}
-  Tmux Session: ${tmuxBridge.sessionExists() ? 'Connected' : 'NOT FOUND'}
+  Session:      ${sessionUp ? 'Connected' : 'NOT FOUND'}
   Agents:       ${getAgents().map(a => a.id).join(', ')}
 `)
+  })()
 })
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...')
-  tmuxBridge.stopPolling()
+  bridge.stopPolling()
   httpServer.close()
   process.exit(0)
 })

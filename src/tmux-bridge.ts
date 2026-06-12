@@ -1,58 +1,29 @@
 import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
-import * as tls from 'tls'
 import { TMUX_SESSION } from './config.js'
-import { getAgents, AgentDefinition } from './agents.js'
+import { getAgents } from './agents.js'
+import {
+  SessionBridge, PaneInfo, PaneRuntimeState, PaneRuntimeRow, ServerPort,
+  AgentMode, CreateWindowOptions, emptyRuntimeState
+} from './bridge.js'
+import {
+  ProcessEntry, ProtocolProber, detectAgentInTree, detectServerInTree,
+  detectModeFromOutput, matchesAgent, looksLikeVersionTitle, isShellCommand
+} from './detection.js'
 
 const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
 const CAPTURE_LINES = 500 // lines
 const MAX_BUFFER = 10 * 1024 * 1024
 
-// Strip ANSI escape sequences (colors, cursor moves, etc.) for reliable string matching.
-const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g
-
-export interface PaneInfo {
-  id: string           // e.g., "@0" (window id)
-  target: string       // e.g., "dev:0" (session:window - targets the active pane in window)
-  index: number        // window index
-  windowIndex: number  // window index (same as index)
-  cwd: string          // current working directory of active pane in window
-  panePid: number      // pid of the active pane's process tree root
-  currentCommand: string // tmux-reported current command in the active pane
-  paneTitle: string    // tmux-reported pane title (set by the TUI via OSC escapes)
-  width: number
-  height: number
-}
-
-export interface ServerPort {
-  port: number
-  protocol: 'http' | 'https'
-}
-
-export interface PaneRuntimeState {
-  // id of the registered agent detected in this pane, or null when no
-  // agent TUI is running (shell prompt, dev server, arbitrary process).
-  agentId: string | null
-  shellReady: boolean
-  currentCommand: string
-  serverRunning: boolean
-  serverCommand: string | null
-  serverPorts: ServerPort[]
-}
-
-type ProcessEntry = { pid: number; ppid: number; command: string }
-
-export class TmuxBridge extends EventEmitter {
+// The POSIX bridge: drives a tmux server. All tmux/ps/lsof calls are
+// synchronous under the hood; the SessionBridge interface is async only
+// because the Windows implementation is pipe-RPC.
+export class TmuxBridge extends EventEmitter implements SessionBridge {
   private lastOutputByPane = new Map<string, string>()
   private polling = false
   private pollTimer: NodeJS.Timeout | null = null
-  private cachedPanes: PaneInfo[] = []
-  // Cached protocol per listening port. Populated asynchronously by
-  // probePort; evicted when the port disappears from the lsof listing so
-  // a new process reusing the same port gets re-probed.
-  private protocolCache = new Map<number, 'http' | 'https'>()
-  private pendingProbes = new Set<number>()
+  private prober = new ProtocolProber()
   // Cooldown between auto-recreate attempts so a repeatedly-failing tmux
   // invocation (e.g. tmux binary missing) doesn't hammer execFileSync every
   // poll tick. Reset on successful recreate.
@@ -61,6 +32,9 @@ export class TmuxBridge extends EventEmitter {
 
   constructor() {
     super()
+    this.prober.on('resolved', (port: number, protocol: 'https') => {
+      this.emit('protocolResolved', port, protocol)
+    })
   }
 
   // If the tmux session has disappeared (user ran tmux kill-session or
@@ -70,7 +44,7 @@ export class TmuxBridge extends EventEmitter {
   // push a fresh paneList to connected clients — otherwise they'd sit on
   // stale pane IDs until a manual refresh.
   private ensureSession(): boolean {
-    if (this.sessionExists()) return true
+    if (this.sessionExistsSync()) return true
     const now = Date.now()
     if (now - this.lastSessionRecreateAttempt < TmuxBridge.SESSION_RECREATE_COOLDOWN_MS) {
       return false
@@ -80,8 +54,7 @@ export class TmuxBridge extends EventEmitter {
       this.runTmux(['new-session', '-d', '-s', TMUX_SESSION, '-c', DEFAULT_CWD])
       console.log(`Recreated tmux session '${TMUX_SESSION}' after it went missing`)
       this.lastOutputByPane.clear()
-      this.protocolCache.clear()
-      this.cachedPanes = []
+      this.prober.clear()
       this.emit('sessionRecreated')
       return true
     } catch (err) {
@@ -125,39 +98,6 @@ export class TmuxBridge extends EventEmitter {
       console.error('Failed to list processes:', error)
       return []
     }
-  }
-
-  // Word-boundary regex for an agent's binary name, compiled once per
-  // agent. Matches "claude", "/usr/local/bin/claude", "claude --flag" but
-  // not "claude-notes.md".
-  private agentRegexCache = new Map<string, RegExp>()
-  private agentRegex(agent: AgentDefinition): RegExp {
-    let re = this.agentRegexCache.get(agent.id)
-    if (!re) {
-      const escaped = agent.binary.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      re = new RegExp(`(^|[\\/\\s])${escaped}($|\\s)`)
-      this.agentRegexCache.set(agent.id, re)
-    }
-    return re
-  }
-
-  private matchesAgent(agent: AgentDefinition, command: string | undefined | null): boolean {
-    if (!command) return false
-    return this.agentRegex(agent).test(command.trim().toLowerCase())
-  }
-
-  // Some agents (Claude Code) set process.title to their version string
-  // (e.g. "2.1.114"), which is what tmux reports as pane_current_command
-  // and what ps shows once the TUI boots.
-  private looksLikeVersionTitle(command: string | undefined | null): boolean {
-    if (!command) return false
-    return /^\d+\.\d+\.\d+/.test(command.trim())
-  }
-
-  private isShellCommand(command: string | undefined | null): boolean {
-    if (!command) return false
-    const normalized = command.trim().toLowerCase()
-    return /(^|\/)(bash|zsh|sh|fish|ksh|tcsh|csh|dash|nu)$/.test(normalized)
   }
 
   // All PIDs currently listening on a TCP socket, mapped to the ports they
@@ -208,132 +148,6 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Speak TLS to 127.0.0.1:<port> just far enough to see whether the server
-  // returns a real ServerHello. A clean TLS handshake => https. An error
-  // other than ECONNREFUSED/unreachable means the server responded with
-  // non-TLS bytes (or closed) => it's speaking plain http. Connection
-  // refused or timeouts yield null so we don't cache a guess during boot.
-  private probePort(port: number): Promise<'http' | 'https' | null> {
-    return new Promise(resolve => {
-      let settled = false
-      const done = (r: 'http' | 'https' | null) => {
-        if (settled) return
-        settled = true
-        resolve(r)
-      }
-      let socket: tls.TLSSocket
-      try {
-        socket = tls.connect({
-          host: '127.0.0.1',
-          port,
-          rejectUnauthorized: false,
-          servername: 'localhost',
-          timeout: 1000
-        })
-      } catch {
-        return done(null)
-      }
-      socket.once('secureConnect', () => {
-        done('https')
-        try { socket.destroy() } catch {}
-      })
-      socket.once('error', (err: NodeJS.ErrnoException) => {
-        const code = err?.code
-        if (code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
-          done(null)
-        } else {
-          // TLS handshake failed mid-way — the server is speaking plaintext.
-          done('http')
-        }
-        try { socket.destroy() } catch {}
-      })
-      socket.once('timeout', () => {
-        done(null)
-        try { socket.destroy() } catch {}
-      })
-    })
-  }
-
-  // Return the cached protocol for a port. If we've never probed it, kick
-  // off a background probe and return 'http' as a placeholder. When the
-  // probe comes back as 'https' we emit protocolResolved so the server can
-  // push an early broadcast — without that, clients would show the wrong
-  // scheme for up to one full runtime-state cycle (~2s) after a server
-  // boots. 'http' results don't need an early broadcast because that's
-  // the default clients already saw.
-  private getPortProtocol(port: number): 'http' | 'https' {
-    const cached = this.protocolCache.get(port)
-    if (cached) return cached
-    if (!this.pendingProbes.has(port)) {
-      this.pendingProbes.add(port)
-      this.probePort(port).then(result => {
-        this.pendingProbes.delete(port)
-        if (!result) return
-        const prev = this.protocolCache.get(port)
-        this.protocolCache.set(port, result)
-        if (prev !== result && result === 'https') {
-          this.emit('protocolResolved', port, result)
-        }
-      }).catch(() => {
-        this.pendingProbes.delete(port)
-      })
-    }
-    return 'http'
-  }
-
-  private gcProtocolCache(activePorts: Set<number>): void {
-    for (const port of this.protocolCache.keys()) {
-      if (!activePorts.has(port)) this.protocolCache.delete(port)
-    }
-  }
-
-  // Given a pane's shell pid and the global listening-PID map, find the
-  // shell-level command the user typed AND the ports its subtree is bound
-  // to. Walks each direct child of the shell; if any descendant of that
-  // child is a listener, the child's own argv is the shell-level command.
-  // Preserves the user's intent for wrapped invocations (`npm run dev` →
-  // node listens, but we return `npm run dev`) while giving the exact
-  // string for direct invocations (`python3 manage.py runserver`). All
-  // listening ports within the matched subtree are collected so the UI
-  // can show quick-launch chips (Vite's HTTP port plus its HMR port, etc.).
-  private detectServer(panePid: number, listeningByPid: Map<number, number[]>, processes?: ProcessEntry[]): { command: string; ports: ServerPort[] } | null {
-    if (!Number.isInteger(panePid) || panePid <= 0) return null
-    if (listeningByPid.size === 0) return null
-
-    processes = processes ?? this.listProcesses()
-    if (processes.length === 0) return null
-
-    const byParent = new Map<number, ProcessEntry[]>()
-    for (const proc of processes) {
-      if (!byParent.has(proc.ppid)) byParent.set(proc.ppid, [])
-      byParent.get(proc.ppid)!.push(proc)
-    }
-
-    const directChildren = byParent.get(panePid) || []
-    for (const child of directChildren) {
-      const stack = [child.pid]
-      const seen = new Set<number>()
-      const ports = new Set<number>()
-      while (stack.length > 0) {
-        const pid = stack.pop()!
-        if (seen.has(pid)) continue
-        seen.add(pid)
-        const pidPorts = listeningByPid.get(pid)
-        if (pidPorts) for (const port of pidPorts) ports.add(port)
-        const kids = byParent.get(pid) || []
-        for (const k of kids) stack.push(k.pid)
-      }
-      if (ports.size > 0) {
-        const sorted = [...ports].sort((a, b) => a - b)
-        return {
-          command: child.command.trim(),
-          ports: sorted.map(port => ({ port, protocol: this.getPortProtocol(port) }))
-        }
-      }
-    }
-    return null
-  }
-
   // Which registered agent (if any) is running in this pane. Three signals,
   // any of which is sufficient, checked in order:
   //   1. pane_current_command word-matches an agent's binary name (rare —
@@ -350,56 +164,17 @@ export class TmuxBridge extends EventEmitter {
     const agents = getAgents()
 
     for (const agent of agents) {
-      if (this.matchesAgent(agent, pane.currentCommand)) return agent.id
+      if (matchesAgent(agent, pane.currentCommand)) return agent.id
     }
-    if (this.looksLikeVersionTitle(pane.currentCommand)) {
+    if (looksLikeVersionTitle(pane.currentCommand)) {
       const versionAgent = agents.find(a => a.versionTitle)
       if (versionAgent) return versionAgent.id
     }
 
-    return this.detectAgentInTree(pane.panePid, agents, processes)
+    return detectAgentInTree(pane.panePid, agents, processes ?? this.listProcesses())
   }
 
-  private detectAgentInTree(rootPid: number, agents: AgentDefinition[], processes?: ProcessEntry[]): string | null {
-    if (!Number.isInteger(rootPid) || rootPid <= 0) return null
-
-    processes = processes ?? this.listProcesses()
-    if (processes.length === 0) return null
-
-    const childrenByParent = new Map<number, number[]>()
-    for (const proc of processes) {
-      if (!childrenByParent.has(proc.ppid)) {
-        childrenByParent.set(proc.ppid, [])
-      }
-      childrenByParent.get(proc.ppid)!.push(proc.pid)
-    }
-
-    const processByPid = new Map(processes.map(proc => [proc.pid, proc]))
-    const stack = [rootPid]
-    const seen = new Set<number>()
-
-    while (stack.length > 0) {
-      const pid = stack.pop()!
-      if (seen.has(pid)) continue
-      seen.add(pid)
-
-      const proc = processByPid.get(pid)
-      if (proc) {
-        for (const agent of agents) {
-          if (this.matchesAgent(agent, proc.command)) return agent.id
-        }
-      }
-
-      const children = childrenByParent.get(pid) || []
-      for (const childPid of children) {
-        stack.push(childPid)
-      }
-    }
-
-    return null
-  }
-
-  sessionExists(): boolean {
+  private sessionExistsSync(): boolean {
     try {
       execFileSync('tmux', ['has-session', '-t', TMUX_SESSION], { stdio: 'ignore' })
       return true
@@ -408,9 +183,13 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
+  async sessionExists(): Promise<boolean> {
+    return this.sessionExistsSync()
+  }
+
   // List all windows in the session (each window gets full viewport, unlike panes which share space)
-  listPanes(): PaneInfo[] {
-    if (!this.sessionExists()) {
+  private listPanesSync(): PaneInfo[] {
+    if (!this.sessionExistsSync()) {
       return []
     }
 
@@ -447,7 +226,6 @@ export class TmuxBridge extends EventEmitter {
       })
       .sort((a, b) => a.windowIndex - b.windowIndex)
 
-      this.cachedPanes = panes
       return panes
     } catch (error) {
       console.error('Failed to list windows:', error)
@@ -455,29 +233,25 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  // Get working directory for a specific pane
-  getPaneWorkingDirectory(target: string): string {
-    try {
-      return this.runTmux(['display-message', '-t', target, '-p', '#{pane_current_path}']).trim()
-    } catch (error) {
-      console.error('Failed to get pane cwd:', error)
-      return ''
-    }
+  async listPanes(): Promise<PaneInfo[]> {
+    return this.listPanesSync()
   }
 
   // Create a new window in the session. If cols/rows are supplied, the new
   // window is sized before the shell paints its first prompt, so the initial
   // prompt doesn't end up wrapped at tmux's default (wider) width. Scrollback
   // is cleared afterwards to drop any mis-wrapped scrap that slipped in
-  // before the resize landed.
-  createWindow(cwd = DEFAULT_CWD, cols?: number, rows?: number): PaneInfo | null {
-    if (!this.sessionExists()) {
+  // before the resize landed. shellId is a Windows concept and ignored here —
+  // tmux windows always run the user's default shell.
+  async createWindow(opts: CreateWindowOptions = {}): Promise<PaneInfo | null> {
+    const { cwd = DEFAULT_CWD, cols, rows } = opts
+    if (!this.sessionExistsSync()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return null
     }
 
     try {
-      const panes = this.listPanes()
+      const panes = this.listPanesSync()
       const nextIndex = panes.length > 0
         ? Math.max(...panes.map(pane => pane.windowIndex)) + 1
         : 0
@@ -503,7 +277,7 @@ export class TmuxBridge extends EventEmitter {
       }
 
       // Get the updated pane list and return the new rightmost window
-      const updatedPanes = this.listPanes()
+      const updatedPanes = this.listPanesSync()
       return updatedPanes.find(pane => pane.windowIndex === nextIndex) || updatedPanes[updatedPanes.length - 1] || null
     } catch (error) {
       console.error('Failed to create window:', error)
@@ -511,8 +285,8 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  clearHistory(target: string): boolean {
-    if (!this.sessionExists()) return false
+  async clearHistory(target: string): Promise<boolean> {
+    if (!this.sessionExistsSync()) return false
     try {
       this.runTmux(['clear-history', '-t', target])
       return true
@@ -523,8 +297,8 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Close a window by target
-  closeWindow(target: string): boolean {
-    if (!this.sessionExists()) {
+  async closeWindow(target: string): Promise<boolean> {
+    if (!this.sessionExistsSync()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
     }
@@ -542,8 +316,8 @@ export class TmuxBridge extends EventEmitter {
   // imagePaths has entries, their absolute paths are prepended
   // space-separated to the payload so Claude Code's TUI detects them as
   // image attachments (same buffer content as one or more drag-and-drops).
-  sendMessage(message: string, target?: string, imagePaths?: string[]): boolean {
-    if (!this.sessionExists()) {
+  async sendMessage(message: string, target?: string, imagePaths?: string[]): Promise<boolean> {
+    if (!this.sessionExistsSync()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
     }
@@ -564,7 +338,7 @@ export class TmuxBridge extends EventEmitter {
       if (!hasImages && message.trim() === 'clear') {
         try {
           const cmd = this.runTmux(['display-message', '-t', target, '-p', '#{pane_current_command}']).trim()
-          if (this.isShellCommand(cmd)) {
+          if (isShellCommand(cmd)) {
             this.runTmux(['send-keys', '-t', target, 'C-l'])
             // Some zsh themes (p10k transient prompt, precmd hooks) redraw
             // asynchronously after Ctrl-L. Delay clear-history so any stale
@@ -612,8 +386,8 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Send a special key (arrow keys, Enter, Escape, etc.). Returns false for unknown keys.
-  sendKey(key: string, target?: string): boolean {
-    if (!this.sessionExists()) {
+  async sendKey(key: string, target?: string): Promise<boolean> {
+    if (!this.sessionExistsSync()) {
       console.error(`Tmux session '${TMUX_SESSION}' not found`)
       return false
     }
@@ -638,7 +412,7 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Capture current pane content with ANSI colors preserved
-  capturePane(lines = CAPTURE_LINES, target?: string): string {
+  private capturePane(lines = CAPTURE_LINES, target?: string): string {
     try {
       const paneTarget = target || TMUX_SESSION
       // -e flag preserves escape sequences (ANSI colors)
@@ -655,7 +429,7 @@ export class TmuxBridge extends EventEmitter {
     this.polling = true
 
     // Initialize with current panes
-    const panes = this.listPanes()
+    const panes = this.listPanesSync()
     for (const pane of panes) {
       this.lastOutputByPane.set(pane.id, this.capturePane(CAPTURE_LINES, pane.target))
     }
@@ -664,7 +438,7 @@ export class TmuxBridge extends EventEmitter {
       // Self-heal: recreate the tmux session if something killed it.
       this.ensureSession()
       // Refresh pane list periodically
-      const currentPanes = this.listPanes()
+      const currentPanes = this.listPanesSync()
 
       for (const pane of currentPanes) {
         const currentOutput = this.capturePane(CAPTURE_LINES, pane.target)
@@ -697,13 +471,13 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Get full pane content (for initial load)
-  getFullOutput(target?: string): string {
+  async getFullOutput(target?: string): Promise<string> {
     return this.capturePane(CAPTURE_LINES, target)
   }
 
   private computePaneRuntimeState(pane: PaneInfo, listeningByPid?: Map<number, number[]>, processes?: ProcessEntry[]): PaneRuntimeState {
     const agentId = this.detectAgentForPane(pane, processes)
-    const shellReady = !agentId && this.isShellCommand(pane.currentCommand)
+    const shellReady = !agentId && isShellCommand(pane.currentCommand)
 
     // An agent TUI and a listening dev server don't realistically share a
     // pane (both want the foreground), so skip the lsof pass when one is up.
@@ -712,7 +486,7 @@ export class TmuxBridge extends EventEmitter {
     let serverPorts: ServerPort[] = []
     if (!agentId) {
       const map = listeningByPid ?? this.listListeningByPid()
-      const detected = this.detectServer(pane.panePid, map, processes)
+      const detected = detectServerInTree(pane.panePid, map, processes ?? this.listProcesses(), this.prober.getPortProtocol)
       if (detected) {
         serverRunning = true
         serverCommand = detected.command
@@ -730,26 +504,15 @@ export class TmuxBridge extends EventEmitter {
     }
   }
 
-  private emptyRuntimeState(): PaneRuntimeState {
-    return {
-      agentId: null,
-      shellReady: false,
-      currentCommand: '',
-      serverRunning: false,
-      serverCommand: null,
-      serverPorts: []
-    }
-  }
-
-  getPaneRuntimeState(target?: string): PaneRuntimeState {
-    if (!target) return this.emptyRuntimeState()
-    const pane = this.listPanes().find(p => p.target === target)
-    if (!pane) return this.emptyRuntimeState()
+  async getPaneRuntimeState(target?: string): Promise<PaneRuntimeState> {
+    if (!target) return emptyRuntimeState()
+    const pane = this.listPanesSync().find(p => p.target === target)
+    if (!pane) return emptyRuntimeState()
     return this.computePaneRuntimeState(pane)
   }
 
   // Batch version used by periodic broadcast — one listPanes + one lsof + one ps pass.
-  getAllPaneRuntimeStates(): Array<{ paneId: string; target: string } & PaneRuntimeState> {
+  async getAllPaneRuntimeStates(): Promise<PaneRuntimeRow[]> {
     const listeningByPid = this.listListeningByPid()
     // Evict protocol cache entries whose ports are no longer listening, so
     // a new process reusing the same port gets re-probed rather than
@@ -758,9 +521,9 @@ export class TmuxBridge extends EventEmitter {
     for (const ports of listeningByPid.values()) {
       for (const p of ports) activePorts.add(p)
     }
-    this.gcProtocolCache(activePorts)
+    this.prober.gc(activePorts)
     const processes = this.listProcesses()
-    return this.listPanes().map(pane => ({
+    return this.listPanesSync().map(pane => ({
       paneId: pane.id,
       target: pane.target,
       ...this.computePaneRuntimeState(pane, listeningByPid, processes)
@@ -769,8 +532,8 @@ export class TmuxBridge extends EventEmitter {
 
   // Ctrl-C the pane's foreground process. Detection catches up on the next
   // runtime-state cycle and the UI flips back to the normal state.
-  stopServer(target: string): boolean {
-    if (!this.sessionExists() || !target) return false
+  async stopServer(target: string): Promise<boolean> {
+    if (!this.sessionExistsSync() || !target) return false
     try {
       this.runTmux(['send-keys', '-t', target, 'C-c'])
       return true
@@ -784,12 +547,12 @@ export class TmuxBridge extends EventEmitter {
   // we can't look it up — then after a short beat re-type it at the prompt.
   // C-u first flushes any half-typed input so the replayed command runs
   // cleanly even if the user was mid-keystroke when they pressed Restart.
-  restartServer(target: string): boolean {
-    if (!this.sessionExists() || !target) return false
-    const pane = this.listPanes().find(p => p.target === target)
+  async restartServer(target: string): Promise<boolean> {
+    if (!this.sessionExistsSync() || !target) return false
+    const pane = this.listPanesSync().find(p => p.target === target)
     if (!pane) return false
 
-    const detected = this.detectServer(pane.panePid, this.listListeningByPid())
+    const detected = detectServerInTree(pane.panePid, this.listListeningByPid(), this.listProcesses(), this.prober.getPortProtocol)
     if (!detected) {
       console.error('No server command found to restart for pane', target)
       return false
@@ -815,40 +578,15 @@ export class TmuxBridge extends EventEmitter {
     return true
   }
 
-  // Detect current Claude Code permission mode from output. Claude-specific:
-  // other agents have no shift+tab indicator line, so this returns 'normal'
-  // for them, which the client ignores.
-  detectMode(target?: string): 'plan' | 'normal' | 'auto-edit' | 'bypass' {
-    const output = this.capturePane(30, target).replace(ANSI_RE, '')
-
-    // The actual indicator looks like: ">> bypass permissions on (shift+tab to cycle)"
-    const modeLineMatch = output.match(/.*(shift\s*\+\s*tab).*/i)
-    if (!modeLineMatch) {
-      return 'normal' // No mode indicator found
-    }
-
-    const modeLine = modeLineMatch[0].toLowerCase()
-
-    if (modeLine.includes('plan')) {
-      return 'plan'
-    } else if (modeLine.includes('bypass')) {
-      return 'bypass'
-    } else if (modeLine.includes('auto') || modeLine.includes('accept edit')) {
-      return 'auto-edit'
-    } else {
-      return 'normal'
-    }
-  }
-
-  // Get cached pane list (from last poll)
-  getCachedPanes(): PaneInfo[] {
-    return this.cachedPanes
+  // Detect current Claude Code permission mode from output.
+  async detectMode(target?: string): Promise<AgentMode> {
+    return detectModeFromOutput(this.capturePane(30, target))
   }
 
   // Resize the tmux window to match browser width
   // Uses resize-window with window-size=manual to allow sizes larger than attached client
-  resizePane(cols: number, rows?: number, target?: string): boolean {
-    if (!this.sessionExists()) {
+  async resizePane(cols: number, rows?: number, target?: string): Promise<boolean> {
+    if (!this.sessionExistsSync()) {
       return false
     }
     if (!target) {
@@ -882,8 +620,8 @@ export class TmuxBridge extends EventEmitter {
   }
 
   // Select/activate a window in tmux (makes it visible in terminal)
-  selectWindow(target: string): boolean {
-    if (!this.sessionExists()) {
+  async selectWindow(target: string): Promise<boolean> {
+    if (!this.sessionExistsSync()) {
       return false
     }
 
@@ -895,18 +633,4 @@ export class TmuxBridge extends EventEmitter {
       return false
     }
   }
-
-  // Get current pane dimensions
-  getPaneDimensions(target?: string): { cols: number; rows: number } | null {
-    try {
-      const paneTarget = target || TMUX_SESSION
-      const output = this.runTmux(['display-message', '-t', paneTarget, '-p', '#{pane_width} #{pane_height}']).trim()
-      const [cols, rows] = output.split(' ').map(Number)
-      return { cols, rows }
-    } catch {
-      return null
-    }
-  }
 }
-
-export const tmuxBridge = new TmuxBridge()

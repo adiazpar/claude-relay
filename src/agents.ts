@@ -198,6 +198,16 @@ function probeBinary(shell: string, binary: string): Promise<boolean | null> {
 }
 
 async function probeAvailability(): Promise<Map<string, boolean | null>> {
+  // Windows has no login-shell convention; where.exe against the
+  // daemon's PATH (the user PATH under a user-level Scheduled Task,
+  // including the npm global bin) is the equivalent probe.
+  if (process.platform === 'win32') {
+    const { probeBinaryWindows } = await import('./win/bridge.js')
+    const results = await Promise.all(
+      AGENTS.map(async agent => [agent.id, await probeBinaryWindows(agent.binary)] as const)
+    )
+    return new Map(results)
+  }
   const shell = process.env.SHELL || (process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh')
   const results = await Promise.all(
     AGENTS.map(async agent => [agent.id, await probeBinary(shell, agent.binary)] as const)
