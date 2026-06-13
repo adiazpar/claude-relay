@@ -579,6 +579,10 @@
       scrollbar-width: none;
     }
     .term-pane .xterm-viewport::-webkit-scrollbar { display: none; }
+    /* xterm 6 also paints its own VS Code-style overlay scrollbar (a div, not a
+       native scrollbar) - the semi-transparent bar. Hide it; touch-drag and
+       wheel still scroll. */
+    .term-pane .xterm-scrollable-element > .scrollbar { display: none !important; }
 
     /* Individual terminal line */
     .terminal-line {
@@ -2155,7 +2159,7 @@
       if (!isSocketUsable()) return;
       if (activePaneId) {
         const rec = terms.get(activePaneId);
-        if (rec) { try { rec.el.style.display = 'block'; rec.fit.fit(); } catch (e) {} }
+        if (rec) { try { rec.el.style.display = 'flex'; fitTerm(rec); } catch (e) {} }
         const cols = rec ? rec.term.cols : undefined, rows = rec ? rec.term.rows : undefined;
         ws.send(JSON.stringify({ type: 'switchPane', paneId: activePaneId, cols, rows }));
       } else {
@@ -2240,7 +2244,11 @@
             // to fit. Gated on font load so the first fit measures the real
             // glyph width, not the fallback. Apps that don't reflow on resize
             // (Claude on Windows ConPTY) must be started AFTER this lands.
-            document.fonts.ready.then(() => { showActiveTerm(); sendResize(); });
+            // Force-reconcile: the pane may carry a stale width from an earlier
+            // layout/font/device state (the pane-host keeps it across reloads and
+            // agent restarts). Reset the gate so sendResize always re-sizes the
+            // pane to THIS browser's real cols, even when our cols are unchanged.
+            document.fonts.ready.then(() => { showActiveTerm(); lastCols = 0; lastRows = 0; sendResize(); });
           }
           break;
         }
@@ -3038,7 +3046,7 @@
       // render at (no wide VT hard-wrapped into a narrow xterm).
       if (isSocketUsable()) {
         const rec = terms.get(paneId);
-        if (rec) { try { rec.el.style.display = 'block'; rec.fit.fit(); } catch (e) {} }
+        if (rec) { try { rec.el.style.display = 'flex'; fitTerm(rec); } catch (e) {} }
         const cols = rec ? rec.term.cols : undefined, rows = rec ? rec.term.rows : undefined;
         ws.send(JSON.stringify({ type: 'switchPane', paneId, cols, rows }));
       } else if (pane.target) {
