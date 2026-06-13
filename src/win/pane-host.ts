@@ -15,9 +15,22 @@ import path from 'path'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import { spawn as ptySpawn, IPty } from '@lydell/node-pty'
-import { Terminal } from '@xterm/headless'
-import { SerializeAddon } from '@xterm/addon-serialize'
+// @xterm/headless and @xterm/addon-serialize ship as bundled CommonJS:
+// their package `main` is a UMD bundle and Node ignores the `module`
+// (ESM) field for a bare specifier with no `exports` map. Node's ESM
+// loader can't statically detect their named exports, so
+// `import { Terminal }` throws "does not provide an export named
+// 'Terminal'" and the pane-host dies at startup. Default-import the
+// module object, destructure the classes at runtime, and re-derive the
+// instance types with InstanceType so the type positions still resolve.
+import xtermHeadless from '@xterm/headless'
+import xtermSerialize from '@xterm/addon-serialize'
 import { PROTOCOL_VERSION, paneHostPipePath, HostPane, CreateParams, HostResponse } from './protocol.js'
+
+const { Terminal } = xtermHeadless
+const { SerializeAddon } = xtermSerialize
+type Terminal = InstanceType<typeof Terminal>
+type SerializeAddon = InstanceType<typeof SerializeAddon>
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
