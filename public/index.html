@@ -2197,7 +2197,15 @@
           const rec = ensureTerm(msg.paneId);
           rec.term.reset();
           rec.term.write(msg.data || '');
-          if (msg.paneId === activePaneId) showActiveTerm();
+          if (msg.paneId === activePaneId) {
+            showActiveTerm();
+            // Lock the pane to THIS device's width on connect/switch (the way
+            // tmux sizes its pane to the client) so an app started here draws
+            // to fit. Gated on font load so the first fit measures the real
+            // glyph width, not the fallback. Apps that don't reflow on resize
+            // (Claude on Windows ConPTY) must be started AFTER this lands.
+            document.fonts.ready.then(() => { showActiveTerm(); sendResize(); });
+          }
           break;
         }
         case 'term-output': {
