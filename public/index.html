@@ -8,6 +8,11 @@
   <meta name="theme-color" content="#1a1915">
   <title>Claude Relay</title>
   <link rel="stylesheet" href="global.css">
+  <!-- Vendored xterm.js 6.0.0 + fit 0.11.0 / web-links 0.12.0 (render-only). -->
+  <link rel="stylesheet" href="vendor/xterm/xterm.css">
+  <script src="vendor/xterm/xterm.js"></script>
+  <script src="vendor/xterm/addon-fit.js"></script>
+  <script src="vendor/xterm/addon-web-links.js"></script>
   <style>
     /* Nerd Font for the terminal canvas. Iosevka NF was picked over
        JetBrainsMono NF because its Dingbats/Misc-Technical coverage is
@@ -543,6 +548,13 @@
       word-break: break-word;
     }
 
+    /* xterm.js render host: fills the output container; xterm owns its own
+       scroll/scrollback. One .term-pane per pane, only the active one shown. */
+    #output { position: relative; overflow: hidden; }
+    #termHost { position: absolute; inset: 0; }
+    .term-pane { position: absolute; inset: 0; padding: 0 8px; }
+    .term-pane, .term-pane .xterm { height: 100%; }
+
     /* Individual terminal line */
     .terminal-line {
       min-height: 16.8px; /* 12px * 1.4 line-height */
@@ -923,7 +935,8 @@
   <div class="pane-tabs hidden" id="paneTabs"></div>
 
   <div class="output-container" id="output">
-    <div class="terminal-content" id="terminalContent"></div>
+    <div class="terminal-content" id="terminalContent" hidden></div>
+    <div id="termHost"></div>
   </div>
 
   <!-- Tab action sheet -->
@@ -1594,6 +1607,7 @@
         this.inputText = '';
         this.allLines = [];
         this.scrollPosition = 0;
+        this.mode = null;
       }
     }
 
@@ -1631,6 +1645,7 @@
     let ws = null;
     let connected = false;
     let lastCols = 0;
+    let lastRows = 0;
     let resizeTimeout = null;
     let lastRxTime = Date.now(); // updated on any inbound WS message (incl. pings)
 
@@ -1715,32 +1730,73 @@
         || { id, name: id, command: null, modeCycleKey: null, imageAttach: false };
     }
 
-    function renderOutput() {
-      const lines = getAllLines();
-      const html = lines.map(line =>
-        `<div class="terminal-line">${ansiToHtml(line)}</div>`
-      ).join('');
-      terminalContent.innerHTML = html;
+    // ----- xterm.js terminals (render-only, one Terminal per pane) -----
+    const TERM_FONT_PX = 12;
+    const TERM_LINE_HEIGHT = 1.4;
+    const terms = new Map(); // paneId -> { term, fit, el }
+    const termHost = document.getElementById('termHost');
+
+    function buildXtermTheme() {
+      const cs = getComputedStyle(document.documentElement);
+      const v = n => cs.getPropertyValue(n).trim() || undefined;
+      const c = ANSI_COLORS;
+      return {
+        background: v('--bg-primary'), foreground: v('--text-primary'),
+        cursor: v('--accent'), cursorAccent: v('--bg-primary'),
+        black: c[0], red: c[1], green: c[2], yellow: c[3], blue: c[4], magenta: c[5], cyan: c[6], white: c[7],
+        brightBlack: c[8], brightRed: c[9], brightGreen: c[10], brightYellow: c[11],
+        brightBlue: c[12], brightMagenta: c[13], brightCyan: c[14], brightWhite: c[15]
+      };
     }
 
-    function getScrollBottom() {
-      return output.scrollHeight - output.scrollTop - output.clientHeight;
+    function ensureTerm(paneId) {
+      let rec = terms.get(paneId);
+      if (rec) return rec;
+      const el = document.createElement('div');
+      el.className = 'term-pane';
+      el.style.display = 'none';
+      termHost.appendChild(el);
+      const term = new Terminal({
+        disableStdin: true, scrollback: 5000, cursorBlink: false,
+        fontFamily: "'Terminal Nerd Font', ui-monospace, monospace",
+        fontSize: TERM_FONT_PX, lineHeight: TERM_LINE_HEIGHT,
+        theme: buildXtermTheme(), allowProposedApi: true
+      });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      try {
+        term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => {
+          if (/^https?:\/\//i.test(uri)) window.open(uri, '_blank', 'noopener');
+        }));
+      } catch (e) {}
+      term.open(el);
+      rec = { term, fit, el };
+      terms.set(paneId, rec);
+      return rec;
     }
 
-    function handleScroll() {
-      followMode = getScrollBottom() < 50;
-      isUserScrolling = true;
-      if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
-      scrollIdleTimer = setTimeout(() => {
-        isUserScrolling = false;
-      }, 120);
+    function showActiveTerm() {
+      for (const [id, rec] of terms) rec.el.style.display = (id === activePaneId) ? 'block' : 'none';
+      const rec = activePaneId ? terms.get(activePaneId) : null;
+      if (rec) { try { rec.fit.fit(); } catch (e) {} }
     }
 
-    function scrollToBottom() {
-      if (followMode) {
-        output.scrollTop = output.scrollHeight;
-      }
+    function disposeTerm(paneId) {
+      const rec = terms.get(paneId);
+      if (!rec) return;
+      terms.delete(paneId);
+      try { rec.term.dispose(); } catch (e) {}
+      try { rec.el.remove(); } catch (e) {}
     }
+
+    // Legacy line-rendering hook — xterm owns rendering now.
+    function renderOutput() {}
+
+    // Scroll is owned by xterm's own viewport now; these are inert shims kept
+    // so existing call sites stay valid.
+    function getScrollBottom() { return 0; }
+    function handleScroll() {}
+    function scrollToBottom() {}
 
     // ============================================
     // OUTPUT UPDATE FUNCTIONS
@@ -1761,21 +1817,10 @@
         : trimmed;
     }
 
-    function applyLinesUpdate(lines, mode, paneId) {
-      const trimmedLines = trimEmptyLines(lines);
-
-      // Store lines in the appropriate pane state
-      const targetPaneId = paneId || activePaneId;
-      if (targetPaneId && paneStates.has(targetPaneId)) {
-        paneStates.get(targetPaneId).allLines = trimmedLines;
-      }
-
-      // Only update display if this is for the active pane
-      if (targetPaneId === activePaneId) {
-        renderOutput();
-        scrollToBottom();
-      }
-    }
+    // Inert: the server no longer sends rendered line frames; output streams
+    // as raw VT into xterm via term-output/term-replay. Kept as a no-op so any
+    // stale caller (e.g. the REST output fallback) doesn't throw.
+    function applyLinesUpdate() {}
 
     function updatePaneRuntimeState(paneId, runtimeState = {}) {
       if (!paneId || !paneStates.has(paneId)) return;
@@ -1797,6 +1842,9 @@
       }
       if (Array.isArray(runtimeState.serverPorts)) {
         state.serverPorts = runtimeState.serverPorts.slice();
+      }
+      if ('mode' in runtimeState) {
+        state.mode = runtimeState.mode || null;
       }
       if (paneId === activePaneId) {
         updateModeActionButton();
@@ -1971,11 +2019,14 @@
     }
 
     function sendResize() {
-      if (!ws || !connected) return;
-      const cols = calculateColumns();
-      if (cols !== lastCols) {
-        lastCols = cols;
-        ws.send(JSON.stringify({ type: 'resize', cols: cols }));
+      if (!ws || !connected || !activePaneId) return;
+      const rec = terms.get(activePaneId);
+      if (!rec) return;
+      try { rec.fit.fit(); } catch (e) { return; } // needs a visible, sized element
+      const cols = rec.term.cols, rows = rec.term.rows;
+      if (cols !== lastCols || rows !== lastRows) {
+        lastCols = cols; lastRows = rows;
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
       }
     }
 
@@ -2103,12 +2154,20 @@
           handlePaneList(msg.panes);
           break;
 
-        case 'output':
-          updatePaneRuntimeState(msg.paneId, msg);
-          if (msg.lines) {
-            scheduleOutputUpdate(msg.lines, msg.mode, msg.paneId);
-          }
+        case 'term-replay': {
+          // History replay on connect/switch: reset the pane's terminal and
+          // write the buffered VT. Live term-output streams after.
+          const rec = ensureTerm(msg.paneId);
+          rec.term.clear();
+          rec.term.write(msg.data || '');
+          if (msg.paneId === activePaneId) showActiveTerm();
           break;
+        }
+        case 'term-output': {
+          // Live VT for the active pane (server only streams the active one).
+          if (typeof msg.data === 'string') ensureTerm(msg.paneId).term.write(msg.data);
+          break;
+        }
 
         case 'paneRuntimeList':
           if (Array.isArray(msg.states)) {
@@ -2146,6 +2205,7 @@
       for (const paneId of paneStates.keys()) {
         if (!currentPaneIds.has(paneId)) {
           paneStates.delete(paneId);
+          disposeTerm(paneId);
         }
       }
 
@@ -2905,13 +2965,11 @@
           .catch(error => console.error('Failed to fetch pane output:', error));
       }
 
-      // Force resize the new window to match phone width
-      lastCols = 0; // Reset so sendResize() will send
+      // Show this pane's xterm terminal (created lazily); the server's
+      // term-replay populates it and live term-output streams after.
+      showActiveTerm();
+      lastCols = 0; lastRows = 0; // force the next sendResize to emit
       sendResize();
-
-      // Re-render with the new pane's lines
-      renderOutput();
-      scrollToBottom();
     }
 
     // Save current pane state
@@ -2993,6 +3051,7 @@
       if (!target || !agent || !agent.command) return;
 
       await sendTerminalCommand('clear', target);
+      try { terms.get(activePaneId)?.term.clear(); } catch (e) {} // also wipe xterm scrollback
       await sendTerminalCommand(agent.command, target);
 
       // Give the agent's TUI a moment to paint, then drop the command echoes
