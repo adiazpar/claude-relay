@@ -549,11 +549,21 @@
     }
 
     /* xterm.js render host: fills the output container; xterm owns its own
-       scroll/scrollback. One .term-pane per pane, only the active one shown. */
+       scroll/scrollback. One .term-pane per pane, only the active one shown.
+       Horizontal padding matches the app chrome (16px, same as header/input). */
     #output { position: relative; overflow: hidden; }
     #termHost { position: absolute; inset: 0; }
-    .term-pane { position: absolute; inset: 0; padding: 0 8px; }
+    .term-pane { position: absolute; inset: 0; padding: 0 16px; }
     .term-pane, .term-pane .xterm { height: 100%; }
+    /* body sets touch-action:none to stop page bounce — re-enable vertical
+       touch scrolling inside the terminal. Hide the scrollbar so its width
+       never changes the usable column count (which caused right-edge wraps). */
+    .term-pane .xterm-viewport {
+      touch-action: pan-y;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .term-pane .xterm-viewport::-webkit-scrollbar { display: none; }
 
     /* Individual terminal line */
     .terminal-line {
