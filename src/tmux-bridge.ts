@@ -436,6 +436,23 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       return false
     }
 
+    if (key === 'WheelUp' || key === 'WheelDown') {
+      // Forward as an SGR mouse-wheel event so a fullscreen TUI (Claude) with
+      // mouse tracking on scrolls its own view. -H sends raw bytes by hex so
+      // tmux does not reinterpret the sequence. Exercised on the Windows
+      // (ConPTY) path; the tmux side is best-effort until tested on macOS.
+      const btn = key === 'WheelUp' ? 64 : 65
+      const seq = `\x1b[<${btn};5;5M`
+      try {
+        const hex = Array.from(seq, c => c.charCodeAt(0).toString(16).padStart(2, '0'))
+        this.runTmux(['send-keys', '-t', target, '-H', ...hex])
+        return true
+      } catch (error) {
+        console.error('Failed to send wheel:', error)
+        return false
+      }
+    }
+
     const tmuxKey = TmuxBridge.KEY_MAP[key]
     if (!tmuxKey) {
       console.error('Rejected unknown key:', key)

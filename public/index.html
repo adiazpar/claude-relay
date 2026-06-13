@@ -1801,9 +1801,10 @@
       term.open(el);
       // xterm 6's viewport scrolls via wheel + scrollbar pointer only; it
       // registers no touch-drag handler, so CSS touch-action alone can't make a
-      // finger drag scroll it. Wire touch drags to term.scrollLines() ourselves.
-      // No-op on the alt screen (an agent TUI) since the alt buffer has no
-      // scrollback - same as a native terminal.
+      // finger drag scroll it. Wire touch drags ourselves: on the main buffer
+      // (shell, inline agents like codex) scroll xterm's scrollback; on the alt
+      // screen (a fullscreen TUI like Claude, which has no scrollback) forward
+      // the drag as mouse-wheel events so the app scrolls its own view.
       let touchY = null, scrollAccum = 0;
       const cellHeight = () => {
         try { const h = term._core._renderService.dimensions.css.cell.height; if (h > 0) return h; } catch (e) {}
@@ -1818,7 +1819,19 @@
         scrollAccum += (y - touchY) / cellHeight();
         touchY = y;
         const lines = Math.trunc(scrollAccum);
-        if (lines !== 0) { scrollAccum -= lines; term.scrollLines(-lines); } // drag down = back into history
+        if (lines === 0) return;
+        scrollAccum -= lines;
+        if (term.buffer.active.type === 'alternate') {
+          // Fullscreen TUI (Claude on ConPTY): the alt buffer has no scrollback,
+          // so term.scrollLines is a no-op. The app has mouse tracking on, so
+          // forward the drag as mouse-wheel events and let IT scroll its own
+          // conversation. drag down (lines>0) = wheel up = back into history.
+          const key = lines > 0 ? 'WheelUp' : 'WheelDown';
+          const n = Math.min(Math.abs(lines), 6);
+          for (let i = 0; i < n; i++) sendKey(key);
+        } else {
+          term.scrollLines(-lines); // main buffer: real xterm scrollback
+        }
       }, { passive: true });
       el.addEventListener('touchend', () => { touchY = null; }, { passive: true });
       rec = { term, fit, el };

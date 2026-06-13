@@ -459,13 +459,23 @@ export class WinBridge extends EventEmitter implements SessionBridge {
       console.error('Refusing to send key without a pane target')
       return false
     }
+    const isWheel = key === 'WheelUp' || key === 'WheelDown'
     const seq = KEY_MAP[key]
-    if (!seq) {
+    if (!isWheel && !seq) {
       console.error('Rejected unknown key:', key)
       return false
     }
     const pane = await this.findHostPane(target)
     if (!pane) return false
+    if (isWheel) {
+      // Forward as an SGR mouse-wheel event (button 64=up, 65=down) at the pane
+      // center, so a fullscreen TUI with mouse tracking on (Claude) scrolls its
+      // own view. The alt buffer has no client-side scrollback to scroll.
+      const btn = key === 'WheelUp' ? 64 : 65
+      const col = Math.max(1, Math.floor(pane.cols / 2))
+      const row = Math.max(1, Math.floor(pane.rows / 2))
+      return this.write(pane.id, `\x1b[<${btn};${col};${row}M`)
+    }
     return this.write(pane.id, seq)
   }
 
