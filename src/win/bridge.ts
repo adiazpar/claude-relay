@@ -66,6 +66,7 @@ class PipeClient {
   private pending = new Map<number, Pending>()
   private closed = false
   onClose: (() => void) | null = null
+  onOutput: ((id: string, data: string) => void) | null = null
 
   private constructor(socket: net.Socket) {
     this.socket = socket
@@ -79,6 +80,10 @@ class PipeClient {
         if (!line.trim()) continue
         try {
           const msg = JSON.parse(line)
+          if (msg && msg.type === 'output') {
+            this.onOutput?.(String(msg.id), typeof msg.data === 'string' ? msg.data : '')
+            continue
+          }
           const entry = this.pending.get(msg?.rid)
           if (entry) {
             this.pending.delete(msg.rid)
@@ -168,6 +173,7 @@ export class WinBridge extends EventEmitter implements SessionBridge {
   private lastSeqByPane = new Map<string, number>()
   private cachedHostPanes = new Map<string, HostPane>() // by pane id
   private lastRuntimeByTarget = new Map<string, PaneRuntimeState>()
+  private outputHandlers = new Set<(paneId: string, data: string) => void>()
 
   private prober = new ProtocolProber()
   private worker = new PowerShellWorker()
@@ -229,6 +235,9 @@ export class WinBridge extends EventEmitter implements SessionBridge {
           }
           client.onClose = () => {
             if (this.client === client) this.client = null
+          }
+          client.onOutput = (id, data) => {
+            for (const h of this.outputHandlers) h(id, data)
           }
           const isFreshHost = this.lastBootId !== null && this.lastBootId !== hello.bootId
           this.lastBootId = hello.bootId
@@ -607,7 +616,8 @@ export class WinBridge extends EventEmitter implements SessionBridge {
       currentCommand: pane.shellId,
       serverRunning,
       serverCommand,
-      serverPorts
+      serverPorts,
+      mode: null
     }
   }
 
@@ -617,6 +627,7 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     if (!pane) return emptyRuntimeState()
     const { win, wsl } = await this.getSnapshots()
     const state = this.computeRuntimeState(pane, win, wsl)
+    if (state.agentId) state.mode = detectModeFromOutput(await this.capture(pane.id, 30))
     this.lastRuntimeByTarget.set(target, state)
     return state
   }
@@ -635,12 +646,29 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     this.prober.gc(activePorts)
 
     this.lastRuntimeByTarget.clear()
-    return panes.map(pane => {
+    return Promise.all(panes.map(async pane => {
       const target = `${TMUX_SESSION}:${pane.index}`
       const state = this.computeRuntimeState(pane, win, wsl)
+      if (state.agentId) state.mode = detectModeFromOutput(await this.capture(pane.id, 30))
       this.lastRuntimeByTarget.set(target, state)
       return { paneId: pane.id, target, ...state }
-    })
+    }))
+  }
+
+  subscribeOutput(handler: (paneId: string, data: string) => void): () => void {
+    this.outputHandlers.add(handler)
+    return () => { this.outputHandlers.delete(handler) }
+  }
+
+  async getReplay(paneId: string): Promise<string> {
+    const client = await this.ensureConnected()
+    if (!client) return ''
+    try {
+      const r = await client.request<{ data: string }>('getReplay', { id: paneId })
+      return r?.data ?? ''
+    } catch {
+      return ''
+    }
   }
 
   async stopServer(target: string): Promise<boolean> {
@@ -729,33 +757,11 @@ export class WinBridge extends EventEmitter implements SessionBridge {
       return
     }
 
-    // Capture only panes whose output sequence moved.
-    for (const pane of panes) {
-      const lastSeq = this.lastSeqByPane.get(pane.id)
-      if (lastSeq === pane.seq) continue
-      this.lastSeqByPane.set(pane.id, pane.seq)
-
-      const text = await this.capture(pane.id, CAPTURE_LINES)
-      const lastText = this.lastOutputByPane.get(pane.id)
-      if (text !== lastText) {
-        this.lastOutputByPane.set(pane.id, text)
-        // Suppress the very first emission per pane (initial snapshot, not
-        // a change) unless we've never seen any output — matches the tmux
-        // poller, which seeds lastOutput before emitting diffs.
-        if (lastText !== undefined) {
-          this.emit('output', text, pane.id, `${TMUX_SESSION}:${pane.index}`)
-        }
-      }
-    }
-
-    // Drop state for removed panes.
-    const liveIds = new Set(panes.map(p => p.id))
-    for (const paneId of this.lastOutputByPane.keys()) {
-      if (!liveIds.has(paneId)) this.lastOutputByPane.delete(paneId)
-    }
-    for (const paneId of this.lastSeqByPane.keys()) {
-      if (!liveIds.has(paneId)) this.lastSeqByPane.delete(paneId)
-    }
+    // Live output now streams via the pane-host's `output` push ->
+    // subscribeOutput -> the relay. The poller's remaining jobs are keeping
+    // the pipe connected (ensureConnected, above) and self-healing an empty
+    // host (above); it no longer captures/diffs render frames.
+    void panes
   }
 }
 

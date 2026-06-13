@@ -34,6 +34,10 @@ export interface PaneRuntimeState {
   serverRunning: boolean
   serverCommand: string | null
   serverPorts: ServerPort[]
+  // Current agent mode (plan/normal/auto-edit/bypass), or null when no agent.
+  // Carried on the runtime-state broadcast so the Mode button updates without
+  // a dedicated output-frame channel (xterm.js owns rendering now).
+  mode: AgentMode | null
 }
 
 export type PaneRuntimeRow = { paneId: string; target: string } & PaneRuntimeState
@@ -48,9 +52,10 @@ export interface CreateWindowOptions {
 }
 
 // Events emitted by every bridge:
-//   'output' (content: string, paneId: string, target: string)
 //   'protocolResolved' (port: number, protocol: 'https')
 //   'sessionRecreated' ()
+// Live terminal output is delivered through subscribeOutput (NOT an event),
+// so it never collides with the EventEmitter channels above.
 export interface SessionBridge extends EventEmitter {
   sessionExists(): Promise<boolean>
   listPanes(): Promise<PaneInfo[]>
@@ -62,6 +67,12 @@ export interface SessionBridge extends EventEmitter {
   getFullOutput(target?: string): Promise<string>
   detectMode(target?: string): Promise<AgentMode>
   resizePane(cols: number, rows?: number, target?: string): Promise<boolean>
+  // Subscribe to live VT output for ALL panes (one global subscription; the
+  // relay fans out to clients by active pane). Returns an unsubscribe fn.
+  subscribeOutput(handler: (paneId: string, data: string) => void): () => void
+  // The pane's ring-buffer history, replayed into a freshly-attached xterm.js
+  // terminal on connect/switch so the client sees scrollback.
+  getReplay(paneId: string): Promise<string>
   // Make the pane visible to a locally-attached terminal client. tmux
   // selects the window; the Windows pane-host has no attach concept, so
   // its implementation is a no-op.
@@ -82,6 +93,7 @@ export function emptyRuntimeState(): PaneRuntimeState {
     currentCommand: '',
     serverRunning: false,
     serverCommand: null,
-    serverPorts: []
+    serverPorts: [],
+    mode: null
   }
 }

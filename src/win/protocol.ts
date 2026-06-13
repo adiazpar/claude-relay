@@ -9,7 +9,10 @@
 // That's what makes it safe to leave running across relay updates —
 // panes survive `relay restart` because only the client side restarts.
 
-export const PROTOCOL_VERSION = 1
+// v2: adds live `output` push notifications + the `getReplay` request for
+// client-side xterm.js rendering. A v1 pane-host cannot stream, so this version
+// requires a pane-host recycle (the relay does not negotiate capabilities).
+export const PROTOCOL_VERSION = 2
 
 // Username- and session-scoped so concurrent users (fast user switching)
 // and multi-instance setups (second relay on another port with its own
@@ -61,8 +64,18 @@ export type HostRequest =
   | { rid: number; method: 'write'; params: { id: string; data: string } }
   | { rid: number; method: 'resize'; params: { id: string; cols: number; rows: number } }
   | { rid: number; method: 'capture'; params: { id: string; lines?: number } }
+  | { rid: number; method: 'getReplay'; params: { id: string } }
   | { rid: number; method: 'clearScrollback'; params: { id: string } }
 
 export type HostResponse =
   | { rid: number; ok: true; result: unknown }
   | { rid: number; ok: false; error: string }
+
+// Unsolicited push from the pane-host to the relay (no rid): live VT output for
+// a pane, as ConPTY delivers it. The relay distinguishes these from responses
+// by the absence of `rid` / presence of `type`.
+export interface HostNotification {
+  type: 'output'
+  id: string
+  data: string
+}

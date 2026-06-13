@@ -25,6 +25,7 @@ import { spawn as ptySpawn, IPty } from '@lydell/node-pty'
 import xtermHeadless from '@xterm/headless'
 import { PROTOCOL_VERSION, paneHostPipePath, HostPane, CreateParams, HostResponse } from './protocol.js'
 import { serializeScreen } from './serialize-screen.js'
+import { RingBuffer } from '../ring-buffer.js'
 
 const { Terminal } = xtermHeadless
 type Terminal = InstanceType<typeof Terminal>
@@ -66,10 +67,22 @@ interface PaneRecord {
   meta: Record<string, string>
   pty: IPty
   term: Terminal
+  ring: RingBuffer
 }
 
 const panes = new Map<string, PaneRecord>()
 let nextIndex = 0
+
+// Connected relay clients (normally one). Live output is pushed to all of them
+// as unsolicited NDJSON notifications; the relay fans out to browsers.
+const clients = new Set<net.Socket>()
+function pushOutput(id: string, data: string): void {
+  if (clients.size === 0) return
+  const line = JSON.stringify({ type: 'output', id, data }) + '\n'
+  for (const socket of clients) {
+    try { socket.write(line) } catch {}
+  }
+}
 
 function toHostPane(p: PaneRecord): HostPane {
   return {
@@ -116,11 +129,14 @@ function createPane(params: CreateParams): HostPane {
     seq: 0,
     meta: params.meta || {},
     pty,
-    term
+    term,
+    ring: new RingBuffer(256 * 1024)
   }
 
   pty.onData(data => {
     record.term.write(data)
+    record.ring.push(data)
+    pushOutput(record.id, data)
     record.seq++
   })
 
@@ -165,6 +181,7 @@ function clearScrollback(record: PaneRecord): void {
   // Clears scrollback AND resets the viewport to a blank screen with the
   // cursor at top — the shell repaints its prompt on the next output.
   record.term.clear()
+  record.ring.clear()
   record.seq++
 }
 
@@ -212,6 +229,11 @@ function handleRequest(method: string, params: any): unknown {
       const lines = Number.isInteger(params?.lines) ? params.lines : undefined
       return { text: capturePane(record, lines) }
     }
+    case 'getReplay': {
+      const record = panes.get(String(params?.id))
+      if (!record) throw new Error('no such pane')
+      return { data: record.ring.replay() }
+    }
     case 'clearScrollback': {
       const record = panes.get(String(params?.id))
       if (!record) throw new Error('no such pane')
@@ -228,6 +250,8 @@ const pipePath = paneHostPipePath(SESSION)
 const server = net.createServer(socket => {
   let buffer = ''
   socket.setEncoding('utf-8')
+  clients.add(socket)
+  socket.on('close', () => clients.delete(socket))
   socket.on('data', chunk => {
     buffer += chunk
     // Backstop against a runaway client — no legitimate request is 10 MB.
@@ -253,7 +277,7 @@ const server = net.createServer(socket => {
       try { socket.write(JSON.stringify(response) + '\n') } catch {}
     }
   })
-  socket.on('error', () => {})
+  socket.on('error', () => { clients.delete(socket) })
 })
 
 server.on('error', (err: NodeJS.ErrnoException) => {
