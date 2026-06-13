@@ -133,18 +133,9 @@ async function validatePaneTarget(target: unknown): Promise<string | null> {
 // switchPane, so the two handlers reliably race). Deriving paneId from
 // paneTarget removes the shared-state read entirely. Returns null if the pane
 // closed between validation and capture.
-async function buildOutputFrame(paneTarget: string): Promise<Record<string, unknown> | null> {
-  const panes = await bridge.listPanes()
-  const pane = panes.find(p => p.target === paneTarget)
-  if (!pane) return null
-  return {
-    type: 'output',
-    paneId: pane.id,
-    lines: toLines(await bridge.getFullOutput(paneTarget)),
-    mode: await bridge.detectMode(paneTarget),
-    ...await bridge.getPaneRuntimeState(paneTarget)
-  }
-}
+// buildOutputFrame removed: rendering moved to xterm.js in the browser, fed by
+// live `term-output` + `term-replay` (see subscribeOutput fan-out below).
+// Runtime state (agent/server/mode) rides the 2s paneRuntimeList broadcast.
 
 function validateDimension(value: unknown, min: number, max: number): number | undefined {
   const n = typeof value === 'number' ? value : parseInt(String(value), 10)
@@ -570,14 +561,9 @@ wss.on('connection', async (ws: WebSocket) => {
           clientState.activePaneTarget = pane.target
           // Select the window in tmux (makes it visible in terminal)
           await bridge.selectWindow(pane.target)
-          // Send output for the new pane
-          ws.send(JSON.stringify({
-            type: 'output',
-            paneId: pane.id,
-            lines: toLines(await bridge.getFullOutput(pane.target)),
-            mode: await bridge.detectMode(pane.target),
-            ...await bridge.getPaneRuntimeState(pane.target)
-          }))
+          // Replay the pane's history into the client's xterm.js; live output
+          // then arrives via the term-output fan-out (subscribeOutput).
+          ws.send(JSON.stringify({ type: 'term-replay', paneId: pane.id, data: await bridge.getReplay(pane.id) }))
         }
       } else if (msg.type === 'send') {
         if (typeof msg.content !== 'string' || msg.content.length === 0) return
@@ -616,32 +602,17 @@ wss.on('connection', async (ws: WebSocket) => {
           type: 'paneList',
           panes
         }))
-        if (!paneTarget) return
-        // Send output for the resolved pane, tagged with the id that owns
-        // paneTarget (not a possibly-stale clientState.activePane).
-        const frame = await buildOutputFrame(paneTarget)
-        if (frame) ws.send(JSON.stringify(frame))
+        // Live output streams via term-output; the client re-attaches (replay)
+        // through switchPane, so no output frame is pushed on refresh.
       } else if (msg.type === 'resize') {
         const cols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
         if (!Number.isInteger(cols) || cols <= 0 || cols > 1000) return
+        const rows = Number.isInteger(msg.rows) ? msg.rows : parseInt(String(msg.rows), 10)
         if (!paneTarget) return
-        // Pin the target now; clientState may be mutated by a concurrent
-        // switchPane before the post-resize timer fires.
-        const resizeTarget = paneTarget
-        const success = await bridge.resizePane(cols, undefined, resizeTarget)
-        if (success) {
-          // After resize, send updated output tagged with the id that owns
-          // resizeTarget (see buildOutputFrame) so a racing switchPane can't
-          // make us emit this pane's bytes under the newly-active pane's id.
-          setTimeout(async () => {
-            try {
-              const frame = await buildOutputFrame(resizeTarget)
-              if (frame) ws.send(JSON.stringify(frame))
-            } catch (err) {
-              console.error('Failed to send post-resize output:', err)
-            }
-          }, 100)
-        }
+        // Resize the PTY/tmux pane to the client's measured geometry; the app
+        // redraws and that redraw streams via term-output, so we no longer push
+        // a post-resize snapshot.
+        await bridge.resizePane(cols, Number.isInteger(rows) && rows > 0 ? rows : undefined, paneTarget)
       } else if (msg.type === 'typing') {
         bridge.setTypingState(msg.isTyping === true)
       } else if (msg.type === 'serverStop') {
@@ -694,47 +665,28 @@ wss.on('connection', async (ws: WebSocket) => {
       panes
     }))
 
-    // Send current output for first pane
+    // Replay the first pane's history into the client's xterm.js; live output
+    // arrives via the term-output fan-out (activePane was set above).
     if (initialPane) {
-      ws.send(JSON.stringify({
-        type: 'output',
-        paneId: initialPane.id,
-        lines: toLines(await bridge.getFullOutput(initialPane.target)),
-        mode: await bridge.detectMode(initialPane.target)
-      }))
+      ws.send(JSON.stringify({ type: 'term-replay', paneId: initialPane.id, data: await bridge.getReplay(initialPane.id) }))
     }
   } catch (error) {
     console.error('Error initializing WS client:', error)
   }
 })
 
-// Forward pane output changes to clients watching that pane
-bridge.on('output', async (rawContent: string, paneId: string, paneTarget: string) => {
-  try {
-    const message = JSON.stringify({
-      type: 'output',
-      paneId,
-      lines: toLines(rawContent),
-      mode: await bridge.detectMode(paneTarget),
-      ...await bridge.getPaneRuntimeState(paneTarget)
-    })
-
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        const clientState = clientStates.get(client)
-        // Send to clients watching this pane
-        if (clientState?.activePane === paneId) {
-          try {
-            client.send(message)
-          } catch (err) {
-            console.error('Failed to send to client:', err)
-          }
-        }
-      }
-    })
-  } catch (error) {
-    console.error('Error forwarding output:', error)
-  }
+// Fan out live VT output to each client watching that pane. One global
+// subscription; xterm.js in the browser renders the stream. Runtime state
+// (agent/server/mode) rides the separate 2s paneRuntimeList broadcast.
+bridge.subscribeOutput((paneId, data) => {
+  const message = JSON.stringify({ type: 'term-output', paneId, data })
+  wss.clients.forEach(client => {
+    if (client.readyState !== WebSocket.OPEN) return
+    const clientState = clientStates.get(client)
+    if (clientState?.activePane === paneId) {
+      try { client.send(message) } catch (err) { console.error('Failed to send term-output:', err) }
+    }
+  })
 })
 
 // Heartbeat: send a tiny ping to every open client so the browser can detect
