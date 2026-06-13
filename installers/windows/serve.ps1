@@ -14,6 +14,25 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# The Scheduled Task launches us with -WindowStyle Hidden, but that is
+# unreliable from Task Scheduler: the powershell console window (which
+# also hosts the relay node child) still appears. Hide our own console
+# window explicitly so the relay runs truly headless. Children that
+# share this console (the relay node) are hidden with it. There may be a
+# brief flash at logon before this line runs. Set RELAY_SHOW_CONSOLE=1
+# to keep the window for debugging.
+if (-not $env:RELAY_SHOW_CONSOLE) {
+  try {
+    Add-Type -Name Win -Namespace RelayConsole -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@ -ErrorAction Stop
+    $h = [RelayConsole.Win]::GetConsoleWindow()
+    if ($h -ne [System.IntPtr]::Zero) { [void][RelayConsole.Win]::ShowWindow($h, 0) }  # 0 = SW_HIDE
+  } catch {}
+}
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $RepoRoot
 

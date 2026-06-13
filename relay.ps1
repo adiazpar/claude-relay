@@ -135,8 +135,18 @@ function Invoke-Install {
   }
 
   # ----- scheduled task -----
+  # Launch the supervisor through `conhost.exe --headless`. On Win11 the
+  # default terminal is Windows Terminal, which ignores -WindowStyle Hidden
+  # / windowsHide and pops a visible console for the task's powershell (and
+  # everything that inherits its console: the relay node, esbuild, the
+  # detection worker). conhost --headless creates a genuinely windowless
+  # pseudoconsole (the same mechanism node-pty uses for panes), bypassing
+  # the Windows Terminal handoff; descendants inherit it, so the whole
+  # relay tree runs with no window. -WindowStyle Hidden is kept as a
+  # belt-and-suspenders for the conhost-default case.
+  $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
   $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $action = New-ScheduledTaskAction -Execute $psExe -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ServeScript`" -Port $port -Session $session"
+  $action = New-ScheduledTaskAction -Execute $conhost -Argument "--headless $psExe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ServeScript`" -Port $port -Session $session"
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
   if (Get-InstalledTask) {

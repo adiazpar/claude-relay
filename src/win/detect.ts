@@ -67,9 +67,17 @@ export class PowerShellWorker {
       // policy entirely.
       const encoded = Buffer.from(WORKER_SCRIPT, 'utf16le').toString('base64')
       const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      // Deliberately NO windowsHide / detached here. windowsHide sets
+      // CREATE_NO_WINDOW, which forces a NEW console for this child; under
+      // Windows Terminal (the Win11 default terminal) that console is
+      // handed to WT and a visible window pops despite the flag. detached
+      // (DETACHED_PROCESS) avoids a console but severs the inherited stdio
+      // pipes this RPC relies on (verified: stdin/stdout stop working).
+      // So we inherit the relay's console instead — the supervisor makes
+      // that console headless via `conhost --headless` — giving no window
+      // while the stdin/stdout pipes stay intact.
       this.child = spawn(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
-        stdio: ['pipe', 'pipe', 'ignore'],
-        windowsHide: true
+        stdio: ['pipe', 'pipe', 'ignore']
       })
       this.child.stdout!.setEncoding('utf-8')
       this.child.stdout!.on('data', (chunk: string) => {

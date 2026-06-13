@@ -187,15 +187,18 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     if (now - this.lastSpawnAttempt < SPAWN_COOLDOWN_MS) return
     this.lastSpawnAttempt = now
     try {
-      // The pane-host is TypeScript run through tsx, same as the relay.
-      let tsxCli: string
-      try {
-        tsxCli = require.resolve('tsx/cli')
-      } catch {
-        tsxCli = path.join(__dirname, '..', '..', 'node_modules', 'tsx', 'dist', 'cli.mjs')
-      }
+      // The pane-host is TypeScript run through tsx, same as the relay,
+      // but launched as `node --import tsx <entry>` (loader in-process)
+      // rather than `node <tsx-cli> <entry>`. The tsx CLI re-spawns node
+      // internally to inject its loader flags; on Windows that inner
+      // process gets a fresh, VISIBLE console window that `windowsHide`
+      // cannot suppress — because this outer process is `detached`
+      // (DETACHED_PROCESS = no console), the inner one has none to
+      // inherit and Windows hands it a new visible one. Loading the tsx
+      // loader in-process keeps the pane-host to a single detached,
+      // console-less process, so no window ever appears.
       const paneHostPath = path.join(__dirname, 'pane-host.ts')
-      const child = spawn(process.execPath, [tsxCli, paneHostPath, '--session', TMUX_SESSION], {
+      const child = spawn(process.execPath, ['--import', 'tsx', paneHostPath, '--session', TMUX_SESSION], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
