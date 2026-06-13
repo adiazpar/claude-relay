@@ -1823,9 +1823,10 @@
     }
 
     function showActiveTerm() {
-      for (const [id, rec] of terms) rec.el.style.display = (id === activePaneId) ? 'block' : 'none';
+      // 'flex' (not 'block') so the .term-pane centering rule applies.
+      for (const [id, rec] of terms) rec.el.style.display = (id === activePaneId) ? 'flex' : 'none';
       const rec = activePaneId ? terms.get(activePaneId) : null;
-      if (rec) { try { rec.fit.fit(); } catch (e) {} }
+      if (rec) fitTerm(rec);
     }
 
     function disposeTerm(paneId) {
@@ -2065,11 +2066,30 @@
       });
     }
 
+    // Programmatic fit: derive cols/rows from the REAL measured cell size and
+    // the REAL .term-pane content box. Unlike the fit addon it does NOT reserve
+    // ~14px for a scrollbar (we hide the scrollbar) - that reserve was the empty
+    // space on the right. The flex-centered .term-pane splits the leftover
+    // sub-cell remainder evenly, so the 16px padding stays symmetric.
+    function fitTerm(rec) {
+      const d = rec.term._core && rec.term._core._renderService &&
+                rec.term._core._renderService.dimensions;
+      const cell = d && d.css && d.css.cell;
+      if (!cell || !cell.width || !cell.height) { try { rec.fit.fit(); } catch (e) {} return; }
+      const w = rec.el.clientWidth, h = rec.el.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      const cols = Math.max(2, Math.floor(w / cell.width));
+      const rows = Math.max(1, Math.floor(h / cell.height));
+      if (cols !== rec.term.cols || rows !== rec.term.rows) {
+        try { rec.term.resize(cols, rows); } catch (e) {}
+      }
+    }
+
     function sendResize() {
       if (!ws || !connected || !activePaneId) return;
       const rec = terms.get(activePaneId);
       if (!rec) return;
-      try { rec.fit.fit(); } catch (e) { return; } // needs a visible, sized element
+      fitTerm(rec);
       const cols = rec.term.cols, rows = rec.term.rows;
       if (cols !== lastCols || rows !== lastRows) {
         lastCols = cols; lastRows = rows;
