@@ -8,6 +8,9 @@ dist/
 *.d.ts
 *.tsbuildinfo
 !public/*.js
+# Vendored third-party browser bundles (xterm.js + addons) are committed assets,
+# not build output — the blanket *.js above would otherwise drop them.
+!public/vendor/**/*.js
 
 # Secrets / certs
 certs/
