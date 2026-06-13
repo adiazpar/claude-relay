@@ -553,13 +553,12 @@
        Horizontal padding matches the app chrome (16px, same as header/input). */
     #output { position: relative; overflow: hidden; }
     #termHost { position: absolute; inset: 0; }
-    .term-pane { position: absolute; inset: 0; padding: 0 16px; }
+    .term-pane { position: absolute; inset: 0; padding: 0 16px; touch-action: pan-y; }
     .term-pane, .term-pane .xterm { height: 100%; }
     /* body sets touch-action:none to stop page bounce — re-enable vertical
        touch scrolling inside the terminal. Hide the scrollbar so its width
        never changes the usable column count (which caused right-edge wraps). */
     .term-pane .xterm-viewport {
-      touch-action: pan-y;
       -webkit-overflow-scrolling: touch;
       scrollbar-width: none;
     }
@@ -1741,7 +1740,7 @@
     }
 
     // ----- xterm.js terminals (render-only, one Terminal per pane) -----
-    const TERM_FONT_PX = 12;
+    const TERM_FONT_PX = 11;
     const TERM_LINE_HEIGHT = 1.4;
     const terms = new Map(); // paneId -> { term, fit, el }
     const termHost = document.getElementById('termHost');
@@ -1780,6 +1779,28 @@
         }));
       } catch (e) {}
       term.open(el);
+      // xterm 6's viewport scrolls via wheel + scrollbar pointer only; it
+      // registers no touch-drag handler, so CSS touch-action alone can't make a
+      // finger drag scroll it. Wire touch drags to term.scrollLines() ourselves.
+      // No-op on the alt screen (an agent TUI) since the alt buffer has no
+      // scrollback - same as a native terminal.
+      let touchY = null, scrollAccum = 0;
+      const cellHeight = () => {
+        try { const h = term._core._renderService.dimensions.css.cell.height; if (h > 0) return h; } catch (e) {}
+        return (TERM_FONT_PX * TERM_LINE_HEIGHT) || 17;
+      };
+      el.addEventListener('touchstart', e => {
+        if (e.touches.length === 1) { touchY = e.touches[0].clientY; scrollAccum = 0; }
+      }, { passive: true });
+      el.addEventListener('touchmove', e => {
+        if (touchY === null || e.touches.length !== 1) return;
+        const y = e.touches[0].clientY;
+        scrollAccum += (y - touchY) / cellHeight();
+        touchY = y;
+        const lines = Math.trunc(scrollAccum);
+        if (lines !== 0) { scrollAccum -= lines; term.scrollLines(-lines); } // drag down = back into history
+      }, { passive: true });
+      el.addEventListener('touchend', () => { touchY = null; }, { passive: true });
       rec = { term, fit, el };
       terms.set(paneId, rec);
       return rec;
@@ -2097,7 +2118,10 @@
     function syncSocketSession() {
       if (!isSocketUsable()) return;
       if (activePaneId) {
-        ws.send(JSON.stringify({ type: 'switchPane', paneId: activePaneId }));
+        const rec = terms.get(activePaneId);
+        if (rec) { try { rec.el.style.display = 'block'; rec.fit.fit(); } catch (e) {} }
+        const cols = rec ? rec.term.cols : undefined, rows = rec ? rec.term.rows : undefined;
+        ws.send(JSON.stringify({ type: 'switchPane', paneId: activePaneId, cols, rows }));
       } else {
         ws.send(JSON.stringify({ type: 'refresh' }));
       }
@@ -2165,10 +2189,13 @@
           break;
 
         case 'term-replay': {
-          // History replay on connect/switch: reset the pane's terminal and
-          // write the buffered VT. Live term-output streams after.
+          // History replay on connect/switch: reset() re-initializes modes,
+          // cursor and active buffer from scratch so a raw-VT replay that
+          // re-enters the alt screen via its own ?1049h lands cleanly (clear()
+          // only collapses the normal buffer and leaves stale mode/cursor state).
+          // Live term-output (same raw format) streams seamlessly after.
           const rec = ensureTerm(msg.paneId);
-          rec.term.clear();
+          rec.term.reset();
           rec.term.write(msg.data || '');
           if (msg.paneId === activePaneId) showActiveTerm();
           break;
@@ -2961,9 +2988,15 @@
         }
       });
 
-      // Request output for this pane via WebSocket
+      // Request output for this pane via WebSocket. Fit first and send the
+      // measured cols/rows so the server resizes the pane to THIS client's width
+      // before replaying - future live output is then authored at the width we
+      // render at (no wide VT hard-wrapped into a narrow xterm).
       if (isSocketUsable()) {
-        ws.send(JSON.stringify({ type: 'switchPane', paneId }));
+        const rec = terms.get(paneId);
+        if (rec) { try { rec.el.style.display = 'block'; rec.fit.fit(); } catch (e) {} }
+        const cols = rec ? rec.term.cols : undefined, rows = rec ? rec.term.rows : undefined;
+        ws.send(JSON.stringify({ type: 'switchPane', paneId, cols, rows }));
       } else if (pane.target) {
         fetch(apiUrl(`/api/output?target=${encodeURIComponent(pane.target)}`))
           .then(res => res.json())

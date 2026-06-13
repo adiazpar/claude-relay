@@ -561,8 +561,19 @@ wss.on('connection', async (ws: WebSocket) => {
           clientState.activePaneTarget = pane.target
           // Select the window in tmux (makes it visible in terminal)
           await bridge.selectWindow(pane.target)
-          // Replay the pane's history into the client's xterm.js; live output
-          // then arrives via the term-output fan-out (subscribeOutput).
+          // Resize the pane to the client's measured geometry FIRST (when the
+          // switchPane carries it) so subsequent live output is authored at the
+          // exact width this client's xterm renders. We do NOT reflow replayed
+          // history: the ring is raw VT (same format as live, no double-paint
+          // seam) and alt-screen content can't be reflowed anyway; stale-width
+          // scrollback self-corrects on the app's next full repaint.
+          const swCols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
+          const swRows = Number.isInteger(msg.rows) ? msg.rows : parseInt(String(msg.rows), 10)
+          if (Number.isInteger(swCols) && swCols > 0 && swCols <= 1000) {
+            await bridge.resizePane(swCols, Number.isInteger(swRows) && swRows > 0 ? swRows : undefined, pane.target)
+          }
+          // Replay the pane's history (raw VT ring) into the client's xterm.js;
+          // live output then arrives via the term-output fan-out.
           ws.send(JSON.stringify({ type: 'term-replay', paneId: pane.id, data: await bridge.getReplay(pane.id) }))
         }
       } else if (msg.type === 'send') {

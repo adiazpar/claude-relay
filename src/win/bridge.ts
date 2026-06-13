@@ -32,7 +32,7 @@ const CAPTURE_LINES = 500
 const RPC_TIMEOUT_MS = 5000
 const SPAWN_COOLDOWN_MS = 5000
 const SNAPSHOT_MEMO_MS = 1000
-const DEFAULT_COLS = 100
+const DEFAULT_COLS = 80
 const DEFAULT_ROWS = 30
 
 // ConPTY plumbing that lives inside every pane's tree but is never "the
