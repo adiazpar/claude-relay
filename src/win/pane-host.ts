@@ -15,22 +15,19 @@ import path from 'path'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import { spawn as ptySpawn, IPty } from '@lydell/node-pty'
-// @xterm/headless and @xterm/addon-serialize ship as bundled CommonJS:
-// their package `main` is a UMD bundle and Node ignores the `module`
-// (ESM) field for a bare specifier with no `exports` map. Node's ESM
-// loader can't statically detect their named exports, so
-// `import { Terminal }` throws "does not provide an export named
-// 'Terminal'" and the pane-host dies at startup. Default-import the
-// module object, destructure the classes at runtime, and re-derive the
-// instance types with InstanceType so the type positions still resolve.
+// @xterm/headless ships as bundled CommonJS: its package `main` is a UMD
+// bundle and Node ignores the `module` (ESM) field for a bare specifier
+// with no `exports` map, so Node's ESM loader can't statically detect its
+// named exports - `import { Terminal }` throws "does not provide an export
+// named 'Terminal'" and the pane-host dies at startup. Default-import the
+// module object, destructure the class at runtime, and re-derive the
+// instance type with InstanceType so the type positions still resolve.
 import xtermHeadless from '@xterm/headless'
-import xtermSerialize from '@xterm/addon-serialize'
 import { PROTOCOL_VERSION, paneHostPipePath, HostPane, CreateParams, HostResponse } from './protocol.js'
+import { serializeScreen } from './serialize-screen.js'
 
 const { Terminal } = xtermHeadless
-const { SerializeAddon } = xtermSerialize
 type Terminal = InstanceType<typeof Terminal>
-type SerializeAddon = InstanceType<typeof SerializeAddon>
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -69,7 +66,6 @@ interface PaneRecord {
   meta: Record<string, string>
   pty: IPty
   term: Terminal
-  serializer: SerializeAddon
 }
 
 const panes = new Map<string, PaneRecord>()
@@ -104,10 +100,9 @@ function createPane(params: CreateParams): HostPane {
     env: process.env as Record<string, string>
   })
 
-  // allowProposedApi is required by the serialize addon.
+  // allowProposedApi enables the buffer cell-inspection API (per-cell
+  // colors/attributes) that serializeScreen() reads to build the capture.
   const term = new Terminal({ cols, rows, scrollback: SCROLLBACK, allowProposedApi: true })
-  const serializer = new SerializeAddon()
-  term.loadAddon(serializer)
 
   const record: PaneRecord = {
     id,
@@ -121,8 +116,7 @@ function createPane(params: CreateParams): HostPane {
     seq: 0,
     meta: params.meta || {},
     pty,
-    term,
-    serializer
+    term
   }
 
   pty.onData(data => {
@@ -158,14 +152,13 @@ function killPane(id: string): void {
   log(`pane ${id} killed`)
 }
 
-// Rendered screen + scrollback with ANSI styling, capture-pane style.
-// serialize() emits \r\n line endings; the relay's whole pipeline
-// (toLines, diffing, mode detection) speaks \n.
+// Rendered screen + scrollback as capture-pane-style flat text+SGR: real
+// spaces (no cursor-motion escapes), \n line endings - matching the
+// POSIX/tmux path that the relay's pipeline (toLines, diffing, mode
+// detection) and the shared web renderer expect. See serialize-screen.ts
+// for why we don't use SerializeAddon's replay-stream output.
 function capturePane(record: PaneRecord, lines?: number): string {
-  const text = record.serializer.serialize().replace(/\r\n/g, '\n')
-  if (lines === undefined) return text
-  const split = text.split('\n')
-  return split.slice(Math.max(0, split.length - lines)).join('\n')
+  return serializeScreen(record.term, lines)
 }
 
 function clearScrollback(record: PaneRecord): void {
