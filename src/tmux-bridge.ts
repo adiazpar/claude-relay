@@ -1,4 +1,7 @@
 import { execFileSync } from 'child_process'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import { EventEmitter } from 'events'
 import { TMUX_SESSION } from './config.js'
 import { getAgents } from './agents.js'
@@ -10,6 +13,7 @@ import {
   ProcessEntry, ProtocolProber, detectAgentInTree, detectServerInTree,
   detectModeFromOutput, matchesAgent, looksLikeVersionTitle, isShellCommand
 } from './detection.js'
+import { RingBuffer } from './ring-buffer.js'
 
 const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
@@ -26,6 +30,11 @@ const HISTORY_CLEAR_POLL_BUDGET = 10
 // because the Windows implementation is pipe-RPC.
 export class TmuxBridge extends EventEmitter implements SessionBridge {
   private lastOutputByPane = new Map<string, string>()
+  // Live VT streaming via `tmux pipe-pane`: each pane's raw output is piped to
+  // a fifo we read; bytes go to a per-pane ring (for replay) and to subscribers.
+  private rings = new Map<string, RingBuffer>()
+  private pipeReaders = new Map<string, { fifo: string; stream: fs.ReadStream; target: string }>()
+  private outputHandlers = new Set<(paneId: string, data: string) => void>()
   // Newly-created panes awaiting a one-time scrollback clear once their output
   // settles (drops the instant-prompt copy p10k leaves in history). Maps pane
   // id -> remaining poll attempts; bounded so we never wipe legitimate
@@ -64,6 +73,7 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       this.runTmux(['new-session', '-d', '-s', TMUX_SESSION, '-c', DEFAULT_CWD])
       console.log(`Recreated tmux session '${TMUX_SESSION}' after it went missing`)
       this.lastOutputByPane.clear()
+      this.disarmAllPipes() // old panes are gone; pollTick re-arms the fresh ones
       this.prober.clear()
       this.emit('sessionRecreated')
       return true
@@ -471,6 +481,7 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       const currentPanes = this.listPanesSync()
 
       for (const pane of currentPanes) {
+        if (!this.pipeReaders.has(pane.id)) this.armPipe(pane)
         let currentOutput = this.capturePane(CAPTURE_LINES, pane.target)
         const lastOutput = this.lastOutputByPane.get(pane.id) || ''
 
@@ -496,7 +507,8 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
         }
 
         if (currentOutput !== lastOutput) {
-          this.emit('output', currentOutput, pane.id, pane.target)
+          // Render now streams via pipe-pane -> subscribeOutput; we keep
+          // tracking lastOutput only for the p10k settle-clear detection above.
           this.lastOutputByPane.set(pane.id, currentOutput)
         }
       }
@@ -507,6 +519,9 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
         if (!currentPaneIds.has(paneId)) {
           this.lastOutputByPane.delete(paneId)
         }
+      }
+      for (const paneId of [...this.pipeReaders.keys()]) {
+        if (!currentPaneIds.has(paneId)) this.disarmPipe(paneId)
       }
       for (const paneId of this.pendingHistoryClear.keys()) {
         if (!currentPaneIds.has(paneId)) {
@@ -524,6 +539,61 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       this.pollTimer = null
     }
     this.lastOutputByPane.clear()
+    this.disarmAllPipes()
+  }
+
+  // ----- live output streaming (pipe-pane -> fifo -> ring + subscribers) -----
+
+  subscribeOutput(handler: (paneId: string, data: string) => void): () => void {
+    this.outputHandlers.add(handler)
+    return () => { this.outputHandlers.delete(handler) }
+  }
+
+  async getReplay(paneId: string): Promise<string> {
+    return this.rings.get(paneId)?.replay() ?? ''
+  }
+
+  // Arm `tmux pipe-pane` for a pane: its raw VT output is piped to a fifo we
+  // read. The fifo is opened O_RDWR ('r+') so the open never blocks and EOF is
+  // not raised when tmux's `cat` writer restarts. The ring is seeded with the
+  // current rendered screen so a client attaching immediately sees content.
+  private armPipe(pane: PaneInfo): void {
+    if (this.pipeReaders.has(pane.id)) return
+    try {
+      const fifo = path.join(os.tmpdir(), `claude-relay-${process.pid}-${pane.id.replace(/[^\w]/g, '_')}.fifo`)
+      try { fs.unlinkSync(fifo) } catch {}
+      execFileSync('mkfifo', [fifo])
+      const stream = fs.createReadStream(fifo, { encoding: 'utf8', flags: 'r+' })
+      const ring = this.rings.get(pane.id) ?? new RingBuffer(256 * 1024)
+      this.rings.set(pane.id, ring)
+      try { ring.push(this.capturePane(CAPTURE_LINES, pane.target)) } catch {}
+      stream.on('data', (chunk: string | Buffer) => {
+        const data = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        ring.push(data)
+        for (const h of this.outputHandlers) h(pane.id, data)
+      })
+      stream.on('error', () => {})
+      this.pipeReaders.set(pane.id, { fifo, stream, target: pane.target })
+      // No -o: always open (replacing any prior pipe). The tmpdir path has no
+      // quotes; single-quote it for the shell tmux runs the command in.
+      this.runTmux(['pipe-pane', '-t', pane.target, `cat > '${fifo}'`])
+    } catch (err) {
+      console.error('Failed to arm pipe-pane for', pane.id, err)
+    }
+  }
+
+  private disarmPipe(paneId: string): void {
+    const r = this.pipeReaders.get(paneId)
+    if (!r) return
+    this.pipeReaders.delete(paneId)
+    this.rings.delete(paneId)
+    try { this.runTmux(['pipe-pane', '-t', r.target]) } catch {} // empty command closes the pipe
+    try { r.stream.close() } catch {}
+    try { fs.unlinkSync(r.fifo) } catch {}
+  }
+
+  private disarmAllPipes(): void {
+    for (const paneId of [...this.pipeReaders.keys()]) this.disarmPipe(paneId)
   }
 
   // Get full pane content (for initial load)
@@ -550,13 +620,20 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       }
     }
 
+    // Mode is meaningful only while an agent TUI is up. capturePane is sync, so
+    // unlike the Windows bridge this needs no extra async round-trip.
+    const mode: AgentMode | null = agentId
+      ? detectModeFromOutput(this.capturePane(30, pane.target))
+      : null
+
     return {
       agentId,
       shellReady,
       currentCommand: pane.currentCommand,
       serverRunning,
       serverCommand,
-      serverPorts
+      serverPorts,
+      mode
     }
   }
 
