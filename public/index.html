@@ -991,7 +991,7 @@
     <div class="shortcuts-row">
       <button class="shortcut-btn" onclick="sendKey('Escape')" title="Escape">
         <i data-lucide="x"></i>
-        <span>Escape</span>
+        <span>Esc</span>
       </button>
       <button class="shortcut-btn" onclick="sendKey('Enter')" title="Enter">
         <i data-lucide="corner-down-left"></i>
@@ -999,7 +999,7 @@
       </button>
       <button class="shortcut-btn" id="modeActionBtn" onclick="handleModeAction()" title="Switch Mode (Shift+Tab)" style="margin-left: auto;">
         <i id="modeActionIcon" data-lucide="repeat"></i>
-        <span id="modeActionLabel">Change mode</span>
+        <span id="modeActionLabel">Mode</span>
       </button>
       <button class="shortcut-btn" id="serverRestartBtn" onclick="handleServerRestart()" title="Restart Server" aria-label="Restart server" style="margin-left: auto; display: none;">
         <i data-lucide="rotate-ccw"></i>
@@ -1849,7 +1849,7 @@
       if (agent) {
         if (agent.modeCycleKey) {
           modeActionBtn.style.display = '';
-          modeActionLabel.textContent = 'Change mode';
+          modeActionLabel.textContent = 'Mode';
           modeActionBtn.title = `Switch Mode (${agent.modeCycleKey})`;
           modeActionBtn.setAttribute('aria-label', 'Change mode');
           setModeActionIcon('repeat');
