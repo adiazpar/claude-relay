@@ -121,6 +121,31 @@ async function validatePaneTarget(target: unknown): Promise<string | null> {
   return panes.some(p => p.target === target) ? target : null
 }
 
+// Build an output frame whose paneId is derived from the SAME target whose
+// bytes are captured, so the tag and the content can never disagree.
+//
+// WS message handlers are async and interleave at their awaits, all sharing
+// one mutable clientState. A handler that tagged the frame with a late read of
+// clientState.activePane while capturing a separately-resolved paneTarget
+// could emit one pane's content under another pane's id when a concurrent
+// switchPane mutated clientState in between -- this was the "open a new tab and
+// it shows the previous tab's terminal" bug (resize fires right after
+// switchPane, so the two handlers reliably race). Deriving paneId from
+// paneTarget removes the shared-state read entirely. Returns null if the pane
+// closed between validation and capture.
+async function buildOutputFrame(paneTarget: string): Promise<Record<string, unknown> | null> {
+  const panes = await bridge.listPanes()
+  const pane = panes.find(p => p.target === paneTarget)
+  if (!pane) return null
+  return {
+    type: 'output',
+    paneId: pane.id,
+    lines: toLines(await bridge.getFullOutput(paneTarget)),
+    mode: await bridge.detectMode(paneTarget),
+    ...await bridge.getPaneRuntimeState(paneTarget)
+  }
+}
+
 function validateDimension(value: unknown, min: number, max: number): number | undefined {
   const n = typeof value === 'number' ? value : parseInt(String(value), 10)
   if (!Number.isFinite(n) || !Number.isInteger(n)) return undefined
@@ -592,30 +617,26 @@ wss.on('connection', async (ws: WebSocket) => {
           panes
         }))
         if (!paneTarget) return
-        // Send output for active pane
-        ws.send(JSON.stringify({
-          type: 'output',
-          paneId: clientState?.activePane,
-          lines: toLines(await bridge.getFullOutput(paneTarget)),
-          mode: await bridge.detectMode(paneTarget),
-          ...await bridge.getPaneRuntimeState(paneTarget)
-        }))
+        // Send output for the resolved pane, tagged with the id that owns
+        // paneTarget (not a possibly-stale clientState.activePane).
+        const frame = await buildOutputFrame(paneTarget)
+        if (frame) ws.send(JSON.stringify(frame))
       } else if (msg.type === 'resize') {
         const cols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
         if (!Number.isInteger(cols) || cols <= 0 || cols > 1000) return
         if (!paneTarget) return
-        const success = await bridge.resizePane(cols, undefined, paneTarget)
+        // Pin the target now; clientState may be mutated by a concurrent
+        // switchPane before the post-resize timer fires.
+        const resizeTarget = paneTarget
+        const success = await bridge.resizePane(cols, undefined, resizeTarget)
         if (success) {
-          // After resize, send updated output
+          // After resize, send updated output tagged with the id that owns
+          // resizeTarget (see buildOutputFrame) so a racing switchPane can't
+          // make us emit this pane's bytes under the newly-active pane's id.
           setTimeout(async () => {
             try {
-              ws.send(JSON.stringify({
-                type: 'output',
-                paneId: clientState?.activePane,
-                lines: toLines(await bridge.getFullOutput(paneTarget)),
-                mode: await bridge.detectMode(paneTarget),
-                ...await bridge.getPaneRuntimeState(paneTarget)
-              }))
+              const frame = await buildOutputFrame(resizeTarget)
+              if (frame) ws.send(JSON.stringify(frame))
             } catch (err) {
               console.error('Failed to send post-resize output:', err)
             }
