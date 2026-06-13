@@ -551,8 +551,13 @@
     /* xterm.js render host: fills the output container; xterm owns its own
        scroll/scrollback. One .term-pane per pane, only the active one shown.
        Horizontal padding matches the app chrome (16px, same as header/input). */
-    #output { position: relative; overflow: hidden; }
-    #termHost { position: absolute; inset: 0; }
+    /* #output keeps its padding-top (clears the fixed header/tabs) and the
+       JS-set padding-bottom (clears the fixed input area). Make it a flex
+       column so #termHost fills exactly that content box - between header and
+       footer - instead of an absolute child that ignores the padding and slides
+       under them. */
+    #output { position: relative; overflow: hidden; display: flex; flex-direction: column; }
+    #termHost { position: relative; flex: 1; min-height: 0; }
     .term-pane { position: absolute; inset: 0; padding: 0 16px; touch-action: pan-y; }
     .term-pane, .term-pane .xterm { height: 100%; }
     /* body sets touch-action:none to stop page bounce — re-enable vertical
