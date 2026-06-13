@@ -557,13 +557,20 @@
        footer - instead of an absolute child that ignores the padding and slides
        under them. */
     #output { position: relative; overflow: hidden; display: flex; flex-direction: column; }
-    #termHost { position: relative; flex: 1; min-height: 0; }
-    /* 16px gap via left/right INSETS, not padding: the fit addon measures this
-       element's width but subtracts the xterm element's padding (0), not this
-       element's, so padding here would be ignored and the terminal would run
-       ~2 cols off the right edge. Insets keep the gap and the column math right. */
-    .term-pane { position: absolute; top: 0; bottom: 0; left: 16px; right: 16px; touch-action: pan-y; }
-    .term-pane, .term-pane .xterm { height: 100%; }
+    #termHost { position: relative; flex: 1; min-height: 0; background: var(--bg-primary); }
+    /* 16px gap via left/right INSETS (the app chrome constant, matching the
+       header/input) - NOT padding: the fit addon measures this element's width
+       but subtracts the xterm ELEMENT's padding (0), not this element's, so
+       padding here would be ignored. The fit addon picks columns/rows
+       programmatically; the leftover is the sub-cell remainder a fixed
+       monospace grid can never divide evenly. Center the grid so that remainder
+       splits symmetrically (even L/R, no bottom strip) and paint the box in the
+       app background so any remainder blends instead of showing black. */
+    .term-pane {
+      position: absolute; top: 0; bottom: 0; left: 16px; right: 16px;
+      display: flex; justify-content: center; align-items: center;
+      background: var(--bg-primary); touch-action: pan-y;
+    }
     /* body sets touch-action:none to stop page bounce — re-enable vertical
        touch scrolling inside the terminal. Hide the scrollbar so its width
        never changes the usable column count (which caused right-edge wraps). */
