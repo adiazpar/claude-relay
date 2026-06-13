@@ -15,12 +15,22 @@ const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
 const CAPTURE_LINES = 500 // lines
 const MAX_BUFFER = 10 * 1024 * 1024
+// How many poll cycles a freshly-created pane stays eligible for the one-time
+// startup scrollback clear before we give up. Bounds the window so a slow
+// shell startup never causes us to clear scrollback the user cares about
+// (~5s at POLL_INTERVAL=500ms).
+const HISTORY_CLEAR_POLL_BUDGET = 10
 
 // The POSIX bridge: drives a tmux server. All tmux/ps/lsof calls are
 // synchronous under the hood; the SessionBridge interface is async only
 // because the Windows implementation is pipe-RPC.
 export class TmuxBridge extends EventEmitter implements SessionBridge {
   private lastOutputByPane = new Map<string, string>()
+  // Newly-created panes awaiting a one-time scrollback clear once their output
+  // settles (drops the instant-prompt copy p10k leaves in history). Maps pane
+  // id -> remaining poll attempts; bounded so we never wipe legitimate
+  // scrollback from a pane the user has already started working in.
+  private pendingHistoryClear = new Map<string, number>()
   private polling = false
   private pollTimer: NodeJS.Timeout | null = null
   private prober = new ProtocolProber()
@@ -239,10 +249,21 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
 
   // Create a new window in the session. If cols/rows are supplied, the new
   // window is sized before the shell paints its first prompt, so the initial
-  // prompt doesn't end up wrapped at tmux's default (wider) width. Scrollback
-  // is cleared afterwards to drop any mis-wrapped scrap that slipped in
-  // before the resize landed. shellId is a Windows concept and ignored here —
-  // tmux windows always run the user's default shell.
+  // prompt doesn't end up wrapped at tmux's default (wider) width.
+  //
+  // The "duplicate prompt bar on a new pane" bug is handled out of band: the
+  // pane is registered for a one-time scrollback clear that the poller fires
+  // once the shell's output settles (see startPolling). Instant-prompt themes
+  // (Powerlevel10k) print a cached instant prompt at startup, then push it into
+  // scrollback when the real prompt replaces it; the live view captures
+  // CAPTURE_LINES of scrollback, so that stale copy renders as a second prompt
+  // even though the VISIBLE screen has only one. clear-history can't run inline
+  // here -- the shell hasn't painted yet, let alone scrolled the instant prompt
+  // into history -- so the clear is deferred until the poller observes the
+  // output stabilise (adapts to shell-startup speed; no guessed delay).
+  //
+  // shellId is a Windows concept and ignored here -- tmux windows always run
+  // the user's default shell.
   async createWindow(opts: CreateWindowOptions = {}): Promise<PaneInfo | null> {
     const { cwd = DEFAULT_CWD, cols, rows } = opts
     if (!this.sessionExistsSync()) {
@@ -278,7 +299,16 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
 
       // Get the updated pane list and return the new rightmost window
       const updatedPanes = this.listPanesSync()
-      return updatedPanes.find(pane => pane.windowIndex === nextIndex) || updatedPanes[updatedPanes.length - 1] || null
+      const newPane = updatedPanes.find(pane => pane.windowIndex === nextIndex) || updatedPanes[updatedPanes.length - 1] || null
+
+      // Register for the deferred, settle-triggered scrollback clear (see the
+      // comment above and startPolling). HISTORY_CLEAR_POLL_BUDGET caps how
+      // long we'll wait so we never clear a pane the user has begun using.
+      if (newPane && this.polling) {
+        this.pendingHistoryClear.set(newPane.id, HISTORY_CLEAR_POLL_BUDGET)
+      }
+
+      return newPane
     } catch (error) {
       console.error('Failed to create window:', error)
       return null
@@ -441,8 +471,29 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       const currentPanes = this.listPanesSync()
 
       for (const pane of currentPanes) {
-        const currentOutput = this.capturePane(CAPTURE_LINES, pane.target)
+        let currentOutput = this.capturePane(CAPTURE_LINES, pane.target)
         const lastOutput = this.lastOutputByPane.get(pane.id) || ''
+
+        // One-time startup scrollback clear for freshly-created panes. Fire it
+        // the first poll the output has settled -- non-empty and unchanged
+        // since the previous poll, i.e. the shell finished its instant-prompt
+        // -> real-prompt churn -- so it drops the stale instant prompt from
+        // history regardless of how fast or slow the shell started. Bounded by
+        // a poll budget so we never wipe scrollback from a pane the user has
+        // already begun working in.
+        if (this.pendingHistoryClear.has(pane.id)) {
+          const remaining = this.pendingHistoryClear.get(pane.id)! - 1
+          const settled = currentOutput.length > 0 && currentOutput === lastOutput
+          if (settled) {
+            try { this.runTmux(['clear-history', '-t', pane.id]) } catch {}
+            this.pendingHistoryClear.delete(pane.id)
+            currentOutput = this.capturePane(CAPTURE_LINES, pane.target)
+          } else if (remaining <= 0) {
+            this.pendingHistoryClear.delete(pane.id)
+          } else {
+            this.pendingHistoryClear.set(pane.id, remaining)
+          }
+        }
 
         if (currentOutput !== lastOutput) {
           this.emit('output', currentOutput, pane.id, pane.target)
@@ -450,11 +501,16 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
         }
       }
 
-      // Clean up removed panes from cache
+      // Clean up removed panes from caches
       const currentPaneIds = new Set(currentPanes.map(p => p.id))
       for (const paneId of this.lastOutputByPane.keys()) {
         if (!currentPaneIds.has(paneId)) {
           this.lastOutputByPane.delete(paneId)
+        }
+      }
+      for (const paneId of this.pendingHistoryClear.keys()) {
+        if (!currentPaneIds.has(paneId)) {
+          this.pendingHistoryClear.delete(paneId)
         }
       }
     }, POLL_INTERVAL)
