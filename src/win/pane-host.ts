@@ -110,7 +110,11 @@ function createPane(params: CreateParams): HostPane {
     cols,
     rows,
     cwd: params.cwd,
-    env: process.env as Record<string, string>
+    // Force Claude Code's classic inline renderer (vs the alt-screen fullscreen
+    // TUI it defaults to since v2.1.89). Inline output flows into xterm's native
+    // scrollback in the browser, so scrolling is smooth/consistent and never
+    // re-wraps mid-scroll. Claude-only var; other agents/shells ignore it.
+    env: { ...process.env, CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1' } as Record<string, string>
   })
 
   // allowProposedApi enables the buffer cell-inspection API (per-cell

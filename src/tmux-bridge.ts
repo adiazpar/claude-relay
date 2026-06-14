@@ -18,6 +18,13 @@ import { RingBuffer } from './ring-buffer.js'
 const DEFAULT_CWD = process.env.HOME || '/'
 const POLL_INTERVAL = 500 // ms
 const CAPTURE_LINES = 500 // lines
+// Force Claude Code's classic inline renderer instead of the alt-screen
+// fullscreen TUI it defaults to since v2.1.89. Inline output flows into xterm's
+// native scrollback in the browser, so scrolling is smooth/consistent and never
+// re-wraps mid-scroll. Claude-only var; other agents/shells ignore it. Set in
+// tmux's global environment (set-environment -g) so panes spawned afterward
+// inherit it -- old-tmux-safe, unlike new-window -e which needs tmux 3.0+.
+const CLAUDE_INLINE_ENV = 'CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN'
 const MAX_BUFFER = 10 * 1024 * 1024
 // How many poll cycles a freshly-created pane stays eligible for the one-time
 // startup scrollback clear before we give up. Bounds the window so a slow
@@ -71,6 +78,7 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
     this.lastSessionRecreateAttempt = now
     try {
       this.runTmux(['new-session', '-d', '-s', TMUX_SESSION, '-c', DEFAULT_CWD])
+      this.setClaudeInlineEnv()
       console.log(`Recreated tmux session '${TMUX_SESSION}' after it went missing`)
       this.lastOutputByPane.clear()
       this.disarmAllPipes() // old panes are gone; pollTick re-arms the fresh ones
@@ -80,6 +88,18 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
     } catch (err) {
       console.error('Failed to recreate tmux session:', err)
       return false
+    }
+  }
+
+  // Set the inline-renderer var in tmux's global environment so panes created
+  // afterward inherit it (tmux builds a new pane's env from the global/session
+  // env at spawn time). Covers both the serve.sh-created default pane's future
+  // windows and the windows we create. Idempotent and cheap; best-effort.
+  private setClaudeInlineEnv(): void {
+    try {
+      this.runTmux(['set-environment', '-g', CLAUDE_INLINE_ENV, '1'])
+    } catch (err) {
+      console.error('Failed to set inline-renderer env:', err)
     }
   }
 
@@ -484,6 +504,9 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
   startPolling() {
     if (this.polling) return
     this.polling = true
+
+    // Make Claude render inline (scrollable) in every pane created from here on.
+    this.setClaudeInlineEnv()
 
     // Initialize with current panes
     const panes = this.listPanesSync()

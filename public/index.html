@@ -1771,7 +1771,7 @@
       const c = ANSI_COLORS;
       return {
         background: v('--bg-primary'), foreground: v('--text-primary'),
-        cursor: v('--accent'), cursorAccent: v('--bg-primary'),
+        cursor: '#ffffff', cursorAccent: v('--bg-primary'),
         black: c[0], red: c[1], green: c[2], yellow: c[3], blue: c[4], magenta: c[5], cyan: c[6], white: c[7],
         brightBlack: c[8], brightRed: c[9], brightGreen: c[10], brightYellow: c[11],
         brightBlue: c[12], brightMagenta: c[13], brightCyan: c[14], brightWhite: c[15]
@@ -1787,6 +1787,10 @@
       termHost.appendChild(el);
       const term = new Terminal({
         disableStdin: true, scrollback: 5000, cursorBlink: false,
+        // Thin white vertical bar, not the default block. These panes are
+        // render-only (never focused), so xterm draws the *inactive* cursor;
+        // set both styles to 'bar' so it's a thin line everywhere.
+        cursorStyle: 'bar', cursorInactiveStyle: 'bar',
         fontFamily: "'Terminal Nerd Font', ui-monospace, monospace",
         fontSize: TERM_FONT_PX, lineHeight: TERM_LINE_HEIGHT,
         theme: buildXtermTheme(), allowProposedApi: true
