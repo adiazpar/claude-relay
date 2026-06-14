@@ -30,9 +30,8 @@ certs/
 .DS_Store
 Thumbs.db
 
-# Per-user state, docs, logs
+# Per-user state, logs
 .claude/
-docs/
 logs/
 *.log
 agents.local.json
