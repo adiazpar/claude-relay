@@ -13,6 +13,7 @@ import net from 'net'
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
+import { execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import { spawn as ptySpawn, IPty } from '@lydell/node-pty'
 // @xterm/headless ships as bundled CommonJS: its package `main` is a UMD
@@ -167,7 +168,19 @@ function killPane(id: string): void {
   const record = panes.get(id)
   if (!record) return
   panes.delete(id)
+  const pid = record.pid
   try { record.pty.kill() } catch {}
+  // Backstop the kill. node-pty terminates every process attached to the pane's
+  // pseudoconsole (GetConsoleProcessList) -- normally the whole agent tree
+  // (claude/codex + cmd + npx + MCP node) since they share one console -- but it
+  // falls back to killing ONLY the shell PID if that lookup times out (5s), and
+  // it misses any process that detached its console. Either would strand the
+  // agent and its MCP children. taskkill /T walks the parent-child TREE instead
+  // (a different axis), sweeping up anything the console-list pass left behind.
+  // Fire-and-forget; a non-zero exit just means the tree was already gone.
+  if (pid > 0) {
+    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true }, () => {})
+  }
   try { record.term.dispose() } catch {}
   log(`pane ${id} killed`)
 }
