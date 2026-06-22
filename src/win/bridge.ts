@@ -32,6 +32,15 @@ const CAPTURE_LINES = 500
 const RPC_TIMEOUT_MS = 5000
 const SPAWN_COOLDOWN_MS = 5000
 const SNAPSHOT_MEMO_MS = 1000
+// Gap between typing a message body and the Enter that submits it. The body and
+// the carriage return must reach the agent as SEPARATE ConPTY reads: an agent
+// TUI (Claude Code / Codex) that sees text+CR fused in one read intermittently
+// treats the burst as a paste and inserts the CR as a literal newline instead
+// of submitting, so the message sits in its input box until a second Enter.
+// This is the explicit Windows analogue of the latency tmux gets for free
+// between its two `send-keys` invocations. Imperceptible to the user; tunable
+// upward if a stick is ever observed under heavy render load.
+const SUBMIT_DELAY_MS = 50
 const DEFAULT_COLS = 80
 const DEFAULT_ROWS = 30
 
@@ -174,6 +183,11 @@ export class WinBridge extends EventEmitter implements SessionBridge {
   private cachedHostPanes = new Map<string, HostPane>() // by pane id
   private lastRuntimeByTarget = new Map<string, PaneRuntimeState>()
   private outputHandlers = new Set<(paneId: string, data: string) => void>()
+  // Per-pane serialization of input writes. A message submit is two writes
+  // (body, then a separate Enter) with a settle delay between them; this chain
+  // guarantees no other write (a scroll key, Stop, a second send) can interleave
+  // between the body and its Enter on the ordered pipe and corrupt the submit.
+  private inputChain = new Map<string, Promise<unknown>>()
 
   private prober = new ProtocolProber()
   private worker = new PowerShellWorker()
@@ -248,6 +262,7 @@ export class WinBridge extends EventEmitter implements SessionBridge {
             this.lastSeqByPane.clear()
             this.cachedHostPanes.clear()
             this.lastRuntimeByTarget.clear()
+            this.inputChain.clear()
             this.prober.clear()
             this.emit('sessionRecreated')
           }
@@ -399,6 +414,27 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     }
   }
 
+  // Run `fn` after any in-flight input op for this pane completes, so multi-write
+  // sequences stay atomic against each other. Failures don't break the chain.
+  private chainInput<T>(paneId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.inputChain.get(paneId) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    this.inputChain.set(paneId, run.then(() => {}, () => {}))
+    return run
+  }
+
+  // Type `text` into a pane and submit it. The carriage return is a SEPARATE
+  // write after a settle delay so it lands as its own ConPTY read (a discrete
+  // Enter) rather than fused onto the body, where an agent TUI would treat the
+  // burst as a paste and not submit. See SUBMIT_DELAY_MS. Atomic via chainInput.
+  private submitLine(paneId: string, text: string): Promise<boolean> {
+    return this.chainInput(paneId, async () => {
+      if (!await this.write(paneId, text)) return false
+      await new Promise(r => setTimeout(r, SUBMIT_DELAY_MS))
+      return this.write(paneId, '\r')
+    })
+  }
+
   // C:\foo\bar.png → /mnt/c/foo/bar.png (default WSL automount). Panes
   // inside a distro can't read Windows paths, so image attachments get
   // translated before being typed.
@@ -451,7 +487,10 @@ export class WinBridge extends EventEmitter implements SessionBridge {
       ? (message.length > 0 ? `${prefix} ${message}` : prefix)
       : message
 
-    return this.write(pane.id, payload + '\r')
+    // Type the body, then submit with a SEPARATE Enter (see submitLine). The
+    // whole payload -- including any joined image paths -- is one write so Claude's
+    // path auto-detection still sees the complete line before the Enter arrives.
+    return this.submitLine(pane.id, payload)
   }
 
   async sendKey(key: string, target?: string): Promise<boolean> {
@@ -474,9 +513,10 @@ export class WinBridge extends EventEmitter implements SessionBridge {
       const btn = key === 'WheelUp' ? 64 : 65
       const col = Math.max(1, Math.floor(pane.cols / 2))
       const row = Math.max(1, Math.floor(pane.rows / 2))
-      return this.write(pane.id, `\x1b[<${btn};${col};${row}M`)
+      return this.chainInput(pane.id, () => this.write(pane.id, `\x1b[<${btn};${col};${row}M`))
     }
-    return this.write(pane.id, seq)
+    // Chained so a key can't land between a message body and its Enter.
+    return this.chainInput(pane.id, () => this.write(pane.id, seq))
   }
 
   private async capture(paneId: string, lines?: number): Promise<string> {
@@ -685,8 +725,8 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     const pane = await this.findHostPane(target)
     if (!pane) return false
     // \x03 through ConPTY becomes CTRL_C_EVENT for the foreground app —
-    // the send-keys C-c equivalent.
-    return this.write(pane.id, '\x03')
+    // the send-keys C-c equivalent. Chained so it can't split a message submit.
+    return this.chainInput(pane.id, () => this.write(pane.id, '\x03'))
   }
 
   async restartServer(target: string): Promise<boolean> {
@@ -742,6 +782,7 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     }
     this.lastOutputByPane.clear()
     this.lastSeqByPane.clear()
+    this.inputChain.clear()
     this.worker.dispose()
   }
 
