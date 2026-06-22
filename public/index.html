@@ -1988,12 +1988,12 @@
 
     function handleServerStop() {
       if (!isSocketUsable()) return;
-      ws.send(JSON.stringify({ type: 'serverStop' }));
+      ws.send(JSON.stringify({ type: 'serverStop', paneTarget: activePaneTarget }));
     }
 
     function handleServerRestart() {
       if (!isSocketUsable()) return;
-      ws.send(JSON.stringify({ type: 'serverRestart' }));
+      ws.send(JSON.stringify({ type: 'serverRestart', paneTarget: activePaneTarget }));
     }
 
     // Render a tappable chip per detected listening port. The server probes
@@ -2114,7 +2114,7 @@
       const cols = rec.term.cols, rows = rec.term.rows;
       if (cols !== lastCols || rows !== lastRows) {
         lastCols = cols; lastRows = rows;
-        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+        ws.send(JSON.stringify({ type: 'resize', cols, rows, paneTarget: activePaneTarget }));
       }
     }
 
@@ -3241,7 +3241,13 @@
       }
 
       if (isSocketUsable()) {
-        ws.send(JSON.stringify({ type: 'send', content: message }));
+        // Pin the destination to the pane THIS client is viewing. Without an
+        // explicit paneTarget the server falls back to its own per-connection
+        // active-pane shadow, which can lag a tab switch or a reconnect and
+        // route the message into the WRONG tab's terminal. The client is the
+        // authority on what it's displaying, so it states the target every time
+        // (the REST paths and sendTerminalCommand already do; this was the gap).
+        ws.send(JSON.stringify({ type: 'send', content: message, paneTarget: activePaneTarget }));
         return;
       }
 
@@ -3265,7 +3271,9 @@
 
     function sendKey(key) {
       if (isSocketUsable()) {
-        ws.send(JSON.stringify({ type: 'key', key: key }));
+        // Same isolation as sendMessage: route the key to the pane this client
+        // is on, not the server's possibly-stale active-pane shadow.
+        ws.send(JSON.stringify({ type: 'key', key: key, paneTarget: activePaneTarget }));
         return;
       }
 
