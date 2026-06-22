@@ -4,7 +4,7 @@ import os from 'os'
 import path from 'path'
 import { EventEmitter } from 'events'
 import { TMUX_SESSION } from './config.js'
-import { getAgents } from './agents.js'
+import { getAgents, getSubmitDelayMs } from './agents.js'
 import {
   SessionBridge, PaneInfo, PaneRuntimeState, PaneRuntimeRow, ServerPort,
   AgentMode, CreateWindowOptions, emptyRuntimeState
@@ -37,6 +37,13 @@ const HISTORY_CLEAR_POLL_BUDGET = 10
 // because the Windows implementation is pipe-RPC.
 export class TmuxBridge extends EventEmitter implements SessionBridge {
   private lastOutputByPane = new Map<string, string>()
+  // Last detected runtime state per target (agent/server/mode), refreshed by the
+  // 2s broadcast. sendMessage reads agentId from here to pick the submit delay
+  // without paying a fresh detection pass on every send.
+  private lastRuntimeByTarget = new Map<string, PaneRuntimeState>()
+  // Per-target serialization of input writes — keeps a message's body and its
+  // separate submitting Enter from being split apart by a concurrent key/stop.
+  private inputChain = new Map<string, Promise<unknown>>()
   // Live VT streaming via `tmux pipe-pane`: each pane's raw output is piped to
   // a fifo we read; bytes go to a per-pane ring (for replay) and to subscribers.
   private rings = new Map<string, RingBuffer>()
@@ -81,6 +88,8 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       this.setClaudeInlineEnv()
       console.log(`Recreated tmux session '${TMUX_SESSION}' after it went missing`)
       this.lastOutputByPane.clear()
+      this.lastRuntimeByTarget.clear()
+      this.inputChain.clear()
       this.disarmAllPipes() // old panes are gone; pollTick re-arms the fresh ones
       this.prober.clear()
       this.emit('sessionRecreated')
@@ -420,15 +429,41 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
         ? (message.length > 0 ? `${prefix} ${message}` : prefix)
         : message
 
-      // -l sends literal keys; argv form means no shell quoting needed
-      this.runTmux(['send-keys', '-t', target, '-l', payload])
-      // C-m is the canonical tmux spelling of carriage return
-      this.runTmux(['send-keys', '-t', target, 'C-m'])
-      return true
+      // Type the body, settle, then send Enter as a SEPARATE key. The two
+      // send-keys already gave a little gap via subprocess-spawn latency, but
+      // that's well under Codex's ~120ms paste-burst window, in which an Enter
+      // is buffered as a literal newline instead of submitting. Key the gap to
+      // the running agent (getSubmitDelayMs); Claude/others use the small
+      // default. Serialized per target so a concurrent key/stop can't land
+      // between the body and its Enter.
+      const delayMs = getSubmitDelayMs(this.lastRuntimeByTarget.get(target)?.agentId)
+      return this.chainInput(target, async () => {
+        try {
+          // -l sends literal keys; argv form means no shell quoting needed
+          this.runTmux(['send-keys', '-t', target, '-l', payload])
+          await new Promise(r => setTimeout(r, delayMs))
+          // C-m is the canonical tmux spelling of carriage return
+          this.runTmux(['send-keys', '-t', target, 'C-m'])
+          return true
+        } catch (error) {
+          console.error('Failed to send message:', error)
+          return false
+        }
+      })
     } catch (error) {
       console.error('Failed to send message:', error)
       return false
     }
+  }
+
+  // Run `fn` after any in-flight input op for this target completes, so a
+  // multi-step submit (body, settle, Enter) stays atomic against concurrent
+  // keys/stops. Failures don't break the chain. Mirrors WinBridge.chainInput.
+  private chainInput<T>(target: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.inputChain.get(target) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    this.inputChain.set(target, run.then(() => {}, () => {}))
+    return run
   }
 
   // Whitelist of keys the client is allowed to send, mapped to tmux key names.
@@ -463,14 +498,16 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       // (ConPTY) path; the tmux side is best-effort until tested on macOS.
       const btn = key === 'WheelUp' ? 64 : 65
       const seq = `\x1b[<${btn};5;5M`
-      try {
-        const hex = Array.from(seq, c => c.charCodeAt(0).toString(16).padStart(2, '0'))
-        this.runTmux(['send-keys', '-t', target, '-H', ...hex])
-        return true
-      } catch (error) {
-        console.error('Failed to send wheel:', error)
-        return false
-      }
+      const hex = Array.from(seq, c => c.charCodeAt(0).toString(16).padStart(2, '0'))
+      return this.chainInput(target, async () => {
+        try {
+          this.runTmux(['send-keys', '-t', target, '-H', ...hex])
+          return true
+        } catch (error) {
+          console.error('Failed to send wheel:', error)
+          return false
+        }
+      })
     }
 
     const tmuxKey = TmuxBridge.KEY_MAP[key]
@@ -479,13 +516,16 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       return false
     }
 
-    try {
-      this.runTmux(['send-keys', '-t', target, tmuxKey])
-      return true
-    } catch (error) {
-      console.error('Failed to send key:', error)
-      return false
-    }
+    // Chained so a key can't land between a message body and its Enter.
+    return this.chainInput(target, async () => {
+      try {
+        this.runTmux(['send-keys', '-t', target, tmuxKey])
+        return true
+      } catch (error) {
+        console.error('Failed to send key:', error)
+        return false
+      }
+    })
   }
 
   // Capture current pane content with ANSI colors preserved
@@ -579,6 +619,8 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
       this.pollTimer = null
     }
     this.lastOutputByPane.clear()
+    this.lastRuntimeByTarget.clear()
+    this.inputChain.clear()
     this.disarmAllPipes()
   }
 
@@ -681,7 +723,9 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
     if (!target) return emptyRuntimeState()
     const pane = this.listPanesSync().find(p => p.target === target)
     if (!pane) return emptyRuntimeState()
-    return this.computePaneRuntimeState(pane)
+    const state = this.computePaneRuntimeState(pane)
+    this.lastRuntimeByTarget.set(target, state)
+    return state
   }
 
   // Batch version used by periodic broadcast — one listPanes + one lsof + one ps pass.
@@ -696,24 +740,28 @@ export class TmuxBridge extends EventEmitter implements SessionBridge {
     }
     this.prober.gc(activePorts)
     const processes = this.listProcesses()
-    return this.listPanesSync().map(pane => ({
-      paneId: pane.id,
-      target: pane.target,
-      ...this.computePaneRuntimeState(pane, listeningByPid, processes)
-    }))
+    this.lastRuntimeByTarget.clear()
+    return this.listPanesSync().map(pane => {
+      const state = this.computePaneRuntimeState(pane, listeningByPid, processes)
+      this.lastRuntimeByTarget.set(pane.target, state)
+      return { paneId: pane.id, target: pane.target, ...state }
+    })
   }
 
   // Ctrl-C the pane's foreground process. Detection catches up on the next
   // runtime-state cycle and the UI flips back to the normal state.
   async stopServer(target: string): Promise<boolean> {
     if (!this.sessionExistsSync() || !target) return false
-    try {
-      this.runTmux(['send-keys', '-t', target, 'C-c'])
-      return true
-    } catch (error) {
-      console.error('Failed to stop server:', error)
-      return false
-    }
+    // Chained so it can't land between a message body and its Enter.
+    return this.chainInput(target, async () => {
+      try {
+        this.runTmux(['send-keys', '-t', target, 'C-c'])
+        return true
+      } catch (error) {
+        console.error('Failed to stop server:', error)
+        return false
+      }
+    })
   }
 
   // Capture the shell-level command BEFORE Ctrl-C — once the process is gone

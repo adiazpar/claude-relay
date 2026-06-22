@@ -25,6 +25,13 @@ export interface AgentDefinition {
   // Whether typing absolute image paths into the agent's input attaches
   // them (Claude Code auto-detects pasted paths). Drives the paperclip.
   imageAttach?: boolean
+  // Milliseconds to wait between typing a message body and the Enter that
+  // submits it (the bridges type the body, settle, then send a separate CR).
+  // Codex's TUI arms a ~120ms paste-burst window in which an Enter is buffered
+  // as a literal newline instead of submitting, so it needs a gap wider than
+  // that; Ink-based agents (Claude) have no such window and use the smaller
+  // default. Omit to use DEFAULT_SUBMIT_DELAY_MS.
+  submitDelayMs?: number
 }
 
 // Keys allowed for modeCycleKey. Must stay a subset of TmuxBridge.KEY_MAP —
@@ -47,6 +54,11 @@ const BUILTIN_AGENTS: AgentDefinition[] = [
     name: 'Codex',
     command: 'codex --dangerously-bypass-approvals-and-sandbox',
     binary: 'codex',
+    // Codex (Rust/ratatui) buffers an Enter as a literal newline for ~120ms
+    // after a paste-like input burst (paste_burst.rs PASTE_ENTER_SUPPRESS_WINDOW);
+    // a single body write lands all bytes in one read, arming that window, so the
+    // default 50ms Enter is swallowed. 150ms clears it so the message submits.
+    submitDelayMs: 150,
   },
   {
     id: 'gemini',
@@ -113,6 +125,10 @@ function sanitizeEntry(raw: unknown, existing: AgentDefinition | undefined): Age
     versionTitle: typeof r.versionTitle === 'boolean' ? r.versionTitle : existing?.versionTitle,
     modeCycleKey,
     imageAttach: typeof r.imageAttach === 'boolean' ? r.imageAttach : existing?.imageAttach,
+    submitDelayMs: typeof r.submitDelayMs === 'number' && Number.isFinite(r.submitDelayMs)
+      && r.submitDelayMs >= 0 && r.submitDelayMs <= 5000
+      ? r.submitDelayMs
+      : existing?.submitDelayMs,
   }
 }
 
@@ -160,6 +176,15 @@ export function getAgents(): AgentDefinition[] {
 
 export function getAgent(id: string): AgentDefinition | undefined {
   return AGENTS.find(a => a.id === id)
+}
+
+// Default gap between typing a message body and its submitting Enter, used by
+// both bridges' submit split. Agents override via submitDelayMs.
+export const DEFAULT_SUBMIT_DELAY_MS = 50
+
+export function getSubmitDelayMs(agentId: string | null | undefined): number {
+  const agent = agentId ? getAgent(agentId) : undefined
+  return agent?.submitDelayMs ?? DEFAULT_SUBMIT_DELAY_MS
 }
 
 // ---------------------------------------------------------------------------

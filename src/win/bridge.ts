@@ -11,7 +11,7 @@ import crypto from 'crypto'
 import { createRequire } from 'module'
 import { fileURLToPath } from 'url'
 import { TMUX_SESSION } from '../config.js'
-import { getAgents } from '../agents.js'
+import { getAgents, getSubmitDelayMs } from '../agents.js'
 import {
   SessionBridge, PaneInfo, PaneRuntimeState, PaneRuntimeRow, ServerPort,
   AgentMode, CreateWindowOptions, emptyRuntimeState
@@ -32,15 +32,6 @@ const CAPTURE_LINES = 500
 const RPC_TIMEOUT_MS = 5000
 const SPAWN_COOLDOWN_MS = 5000
 const SNAPSHOT_MEMO_MS = 1000
-// Gap between typing a message body and the Enter that submits it. The body and
-// the carriage return must reach the agent as SEPARATE ConPTY reads: an agent
-// TUI (Claude Code / Codex) that sees text+CR fused in one read intermittently
-// treats the burst as a paste and inserts the CR as a literal newline instead
-// of submitting, so the message sits in its input box until a second Enter.
-// This is the explicit Windows analogue of the latency tmux gets for free
-// between its two `send-keys` invocations. Imperceptible to the user; tunable
-// upward if a stick is ever observed under heavy render load.
-const SUBMIT_DELAY_MS = 50
 const DEFAULT_COLS = 80
 const DEFAULT_ROWS = 30
 
@@ -426,11 +417,14 @@ export class WinBridge extends EventEmitter implements SessionBridge {
   // Type `text` into a pane and submit it. The carriage return is a SEPARATE
   // write after a settle delay so it lands as its own ConPTY read (a discrete
   // Enter) rather than fused onto the body, where an agent TUI would treat the
-  // burst as a paste and not submit. See SUBMIT_DELAY_MS. Atomic via chainInput.
-  private submitLine(paneId: string, text: string): Promise<boolean> {
+  // burst as a paste and insert the CR as a newline instead of submitting. The
+  // delay is per-agent (getSubmitDelayMs) because Codex needs a wider gap than
+  // Claude to clear its paste-burst window. Atomic via chainInput so the body
+  // and its Enter can't be split by a concurrent write.
+  private submitLine(paneId: string, text: string, delayMs: number): Promise<boolean> {
     return this.chainInput(paneId, async () => {
       if (!await this.write(paneId, text)) return false
-      await new Promise(r => setTimeout(r, SUBMIT_DELAY_MS))
+      await new Promise(r => setTimeout(r, delayMs))
       return this.write(paneId, '\r')
     })
   }
@@ -490,7 +484,10 @@ export class WinBridge extends EventEmitter implements SessionBridge {
     // Type the body, then submit with a SEPARATE Enter (see submitLine). The
     // whole payload -- including any joined image paths -- is one write so Claude's
     // path auto-detection still sees the complete line before the Enter arrives.
-    return this.submitLine(pane.id, payload)
+    // The settle delay is keyed to whichever agent the 2s detection cycle last
+    // saw in this pane (Codex needs longer than Claude); default if unknown.
+    const agentId = this.lastRuntimeByTarget.get(target)?.agentId
+    return this.submitLine(pane.id, payload, getSubmitDelayMs(agentId))
   }
 
   async sendKey(key: string, target?: string): Promise<boolean> {
