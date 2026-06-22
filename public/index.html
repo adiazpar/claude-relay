@@ -2251,21 +2251,36 @@
           // re-enters the alt screen via its own ?1049h lands cleanly (clear()
           // only collapses the normal buffer and leaves stale mode/cursor state).
           // Live term-output (same raw format) streams seamlessly after.
+          //
+          // ORDER MATTERS: the terminal must reach its final (font-loaded)
+          // geometry BEFORE the ring is written, never after. Re-fitting an
+          // xterm immediately after a fresh raw-VT write was the cause of the
+          // intermittent blank/cut-out display on Windows -- the content stayed
+          // intact in the buffer but the post-write reflow glitched the render
+          // to empty (recoverable only by a switch or new output, since both
+          // write into an already-sized terminal). So: reset, fit (font-gated),
+          // THEN paint, mirroring the switch path that already works reliably.
           const rec = ensureTerm(msg.paneId);
-          rec.term.reset();
-          rec.term.write(msg.data || '');
+          rec.term.reset(); // empty first so the fit below reflows nothing stale
           if (msg.paneId === activePaneId) {
+            // Fit the empty term, then paint synchronously (so live term-output
+            // can't interleave ahead of the ring), then reconcile the pane-host.
             showActiveTerm();
-            // Lock the pane to THIS device's width on connect/switch (the way
-            // tmux sizes its pane to the client) so an app started here draws
-            // to fit. Gated on font load so the first fit measures the real
-            // glyph width, not the fallback. Apps that don't reflow on resize
-            // (Claude on Windows ConPTY) must be started AFTER this lands.
-            // Force-reconcile: the pane may carry a stale width from an earlier
-            // layout/font/device state (the pane-host keeps it across reloads and
-            // agent restarts). Reset the gate so sendResize always re-sizes the
-            // pane to THIS browser's real cols, even when our cols are unchanged.
-            document.fonts.ready.then(() => { showActiveTerm(); lastCols = 0; lastRows = 0; sendResize(); });
+            rec.term.write(msg.data || '');
+            lastCols = 0; lastRows = 0; sendResize();
+            // First load only: the webfont can change glyph metrics after this
+            // first fit (fallback width != real width). Re-fit, re-reconcile, and
+            // force a clean re-render once it lands. After first load fonts stay
+            // 'loaded', so every later switch/reconnect skips this entirely.
+            if (document.fonts.status !== 'loaded') {
+              document.fonts.ready.then(() => {
+                showActiveTerm(); lastCols = 0; lastRows = 0; sendResize();
+                try { rec.term.refresh(0, rec.term.rows - 1); } catch (e) {}
+              });
+            }
+          } else {
+            // Hidden pane: no geometry to settle; just reconstruct its buffer.
+            rec.term.write(msg.data || '');
           }
           break;
         }
