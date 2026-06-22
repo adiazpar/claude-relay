@@ -553,28 +553,49 @@ wss.on('connection', async (ws: WebSocket) => {
       const paneTarget = requestedTarget ?? await resolveClientPaneTarget(clientState)
 
       if (msg.type === 'switchPane') {
-        // Client is switching to a different pane
-        const panes = await serializePanes()
-        const pane = panes.find(p => p.id === msg.paneId)
-        if (pane && clientState) {
-          clientState.activePane = pane.id
-          clientState.activePaneTarget = pane.target
-          // Select the window in tmux (makes it visible in terminal)
-          await bridge.selectWindow(pane.target)
-          // Resize the pane to the client's measured geometry FIRST (when the
-          // switchPane carries it) so subsequent live output is authored at the
-          // exact width this client's xterm renders. We do NOT reflow replayed
-          // history: the ring is raw VT (same format as live, no double-paint
-          // seam) and alt-screen content can't be reflowed anyway; stale-width
-          // scrollback self-corrects on the app's next full repaint.
-          const swCols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
-          const swRows = Number.isInteger(msg.rows) ? msg.rows : parseInt(String(msg.rows), 10)
-          if (Number.isInteger(swCols) && swCols > 0 && swCols <= 1000) {
-            await bridge.resizePane(swCols, Number.isInteger(swRows) && swRows > 0 ? swRows : undefined, pane.target)
+        // The CLIENT is the authority on which pane it is displaying, so record
+        // its stated active pane FIRST and unconditionally (subject only to a
+        // sanity bound) -- the term-output fan-out keys solely on this value, so
+        // it must track what the user is actually viewing with no drop path.
+        //
+        // The old shape (`const pane = serializePanes().find(...); if (pane &&
+        // clientState) { activePane = pane.id; ... }`) coupled the authoritative
+        // state to a best-effort lookup: a transient list miss (a just-created
+        // pane not yet in cachedHostPanes, a post-pane-host-restart cache reset,
+        // or -- before the synchronous clientStates.set below -- clientState
+        // being undefined during a reconnect) silently bailed, leaving activePane
+        // pinned to a stale pane. Because the live stream has NO other self-heal,
+        // the viewed pane then froze until the user manually switched again.
+        // activePane is only ever compared by equality in the fan-out, so a
+        // not-yet-listed id simply matches nothing until that pane's bytes appear
+        // -- it can never mis-route another pane's output.
+        if (clientState && typeof msg.paneId === 'string' && msg.paneId.length > 0 && msg.paneId.length <= 128) {
+          clientState.activePane = msg.paneId
+          const panes = await serializePanes()
+          const pane = panes.find(p => p.id === msg.paneId)
+          // Best-effort follow-up: select + size + replay only when the pane is
+          // actually live right now. If it isn't yet, the authoritative
+          // activePane above already routes its live output the moment it starts;
+          // the client keeps its existing buffer until then (no freeze).
+          if (pane) {
+            clientState.activePaneTarget = pane.target
+            // Select the window in tmux (makes it visible in terminal)
+            await bridge.selectWindow(pane.target)
+            // Resize the pane to the client's measured geometry FIRST (when the
+            // switchPane carries it) so subsequent live output is authored at the
+            // exact width this client's xterm renders. We do NOT reflow replayed
+            // history: the ring is raw VT (same format as live, no double-paint
+            // seam) and alt-screen content can't be reflowed anyway; stale-width
+            // scrollback self-corrects on the app's next full repaint.
+            const swCols = Number.isInteger(msg.cols) ? msg.cols : parseInt(String(msg.cols), 10)
+            const swRows = Number.isInteger(msg.rows) ? msg.rows : parseInt(String(msg.rows), 10)
+            if (Number.isInteger(swCols) && swCols > 0 && swCols <= 1000) {
+              await bridge.resizePane(swCols, Number.isInteger(swRows) && swRows > 0 ? swRows : undefined, pane.target)
+            }
+            // Replay the pane's history (raw VT ring) into the client's xterm.js;
+            // live output then arrives via the term-output fan-out.
+            ws.send(JSON.stringify({ type: 'term-replay', paneId: pane.id, data: await bridge.getReplay(pane.id) }))
           }
-          // Replay the pane's history (raw VT ring) into the client's xterm.js;
-          // live output then arrives via the term-output fan-out.
-          ws.send(JSON.stringify({ type: 'term-replay', paneId: pane.id, data: await bridge.getReplay(pane.id) }))
         }
       } else if (msg.type === 'send') {
         if (typeof msg.content !== 'string' || msg.content.length === 0) return
@@ -661,14 +682,25 @@ wss.on('connection', async (ws: WebSocket) => {
     clientStates.delete(ws)
   })
 
+  // Create the client's state SYNCHRONOUSLY, before the awaits below. A
+  // reconnecting client sends `switchPane` from its socket.onopen the instant
+  // the handshake completes (syncSocketSession), and that frame can land while
+  // serializePanes() -- a round-trip to the pane-host on Windows -- is still in
+  // flight. The message handler is already registered, so it runs with
+  // clientStates.get(ws) === undefined; the switchPane guard `if (pane &&
+  // clientState)` then silently drops it, the default below pins activePane to
+  // the FIRST pane, and the output fan-out streams the wrong pane -- the pane
+  // the user is actually viewing goes dark ("frozen") until they switch tabs
+  // (which re-sends switchPane after setup has completed). Manifests with 2+
+  // panes when the active one isn't panes[0]; re-triggers on every
+  // background->resume because each resume reconnects. The slow Windows pipe
+  // RPC makes the window wide enough to hit reliably; tmux's fast local
+  // listPanes mostly hides it, but the race is the same shared code.
+  clientStates.set(ws, { activePane: null, activePaneTarget: null })
+
   try {
-    // Initialize client state
     const panes = await serializePanes()
-    const initialPane = panes[0] || null
-    clientStates.set(ws, {
-      activePane: initialPane?.id || null,
-      activePaneTarget: initialPane?.target || null
-    })
+    const clientState = clientStates.get(ws)
 
     // Send pane list
     ws.send(JSON.stringify({
@@ -676,10 +708,18 @@ wss.on('connection', async (ws: WebSocket) => {
       panes
     }))
 
-    // Replay the first pane's history into the client's xterm.js; live output
-    // arrives via the term-output fan-out (activePane was set above).
-    if (initialPane) {
-      ws.send(JSON.stringify({ type: 'term-replay', paneId: initialPane.id, data: await bridge.getReplay(initialPane.id) }))
+    // Default to the first pane ONLY if the client hasn't already chosen one
+    // via a switchPane that raced the await above (clientState is mutated, never
+    // replaced, so that choice survives). Skipped entirely if the socket closed
+    // mid-setup (close handler deleted the state). Live output then arrives via
+    // the term-output fan-out.
+    if (clientState && !clientState.activePane) {
+      const initialPane = panes[0] || null
+      clientState.activePane = initialPane?.id || null
+      clientState.activePaneTarget = initialPane?.target || null
+      if (initialPane) {
+        ws.send(JSON.stringify({ type: 'term-replay', paneId: initialPane.id, data: await bridge.getReplay(initialPane.id) }))
+      }
     }
   } catch (error) {
     console.error('Error initializing WS client:', error)
